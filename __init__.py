@@ -17,6 +17,7 @@ import os
 import re
 from functools import partial
 
+from PyQt6 import QtCore, QtNetwork
 from PyQt6.QtWidgets import QCheckBox, QComboBox, QLabel, QLineEdit, QVBoxLayout
 
 from picard.config import BoolOption, TextOption
@@ -519,6 +520,79 @@ def _write_lyrics(ctx: _Lookup, description: str, synced: str, plain: str) -> No
 # request chain
 # ---------------------------------------------------------------------------
 
+class _NetEaseClient:
+    """Dedicated HTTP/1.1 client for music.163.com.
+
+    Picard's shared web service negotiates HTTP/2, and music.163.com's CDN
+    intermittently drops those streams. Measured on this machine with Qt 6.11:
+    HTTP/2 failed one time in three (NetworkError.RemoteHostClosedError, after
+    a five second stall) while the identical requests over HTTP/1.1 succeeded
+    three times out of three in about half a second each. The same protocol
+    errors show up in Picard's log for music.163.com, so NetEase is fetched
+    through this client with HTTP/2 turned off. It still honours the
+    application proxy, which Qt applies to every QNetworkAccessManager.
+    """
+
+    def __init__(self):
+        self._manager = None
+        self._handlers = {}
+
+    def _manager_instance(self):
+        if self._manager is None:
+            self._manager = QtNetwork.QNetworkAccessManager()
+        return self._manager
+
+    def get(self, url, params, handler):
+        """Issue a GET and deliver ``handler(document, reply, error)``."""
+        qurl = QtCore.QUrl(url)
+        if params:
+            query = QtCore.QUrlQuery(qurl)
+            for key, value in params.items():
+                query.addQueryItem(str(key), str(value))
+            qurl.setQuery(query)
+
+        request = QtNetwork.QNetworkRequest(qurl)
+        request.setAttribute(
+            QtNetwork.QNetworkRequest.Attribute.Http2AllowedAttribute, False
+        )
+        for name, value in NETEASE_HEADERS.items():
+            request.setRawHeader(name.encode('ascii'), value.encode('ascii'))
+
+        reply = self._manager_instance().get(request)
+        self._handlers[reply] = handler
+        reply.finished.connect(partial(self._handle_finished, reply))
+        return reply
+
+    def _handle_finished(self, reply):
+        handler = self._handlers.pop(reply, None)
+        failure = None
+        document = None
+        if reply.error() != QtNetwork.QNetworkReply.NetworkError.NoError:
+            failure = reply.error()
+        else:
+            document = _as_json(bytes(reply.readAll()))
+            if document is None:
+                failure = 'unparseable response'
+        if handler is not None:
+            try:
+                handler(document, reply, failure)
+            except Exception:  # pragma: no cover - defensive
+                pass
+        reply.deleteLater()
+
+
+def _netease_client(api):
+    """Return the NetEase client for this session, creating it on first use."""
+    client = getattr(api, '_lyrics_fetcher_netease_client', None)
+    if client is None:
+        client = _NetEaseClient()
+        try:
+            api._lyrics_fetcher_netease_client = client
+        except Exception:  # pragma: no cover - defensive
+            pass
+    return client
+
+
 def _dispatch(ctx: _Lookup, sources, index):
     """Fire the request for sources[index], or give up when none is left."""
     if index >= len(sources):
@@ -669,19 +743,15 @@ class FetchLyricsAction(BaseAction):
 
 def _request_netease(ctx: _Lookup, sources, index):
     metadata = ctx.file.metadata
-    return ctx.api.web_service.get_url(
-        url=NETEASE_SEARCH_URL,
-        handler=partial(_on_netease_search, ctx, sources, index),
-        # Deliberately no parser: see _as_json().
-        parse_response_type=None,
-        unencoded_queryargs={
+    return _netease_client(ctx.api).get(
+        NETEASE_SEARCH_URL,
+        {
             's': '%s %s' % (metadata.get('title'), metadata.get('artist')),
             'type': 1,
             'offset': 0,
             'limit': NETEASE_SEARCH_LIMIT,
         },
-        headers=dict(NETEASE_HEADERS),
-        priority=True,
+        partial(_on_netease_search, ctx, sources, index),
     )
 
 
@@ -714,14 +784,10 @@ def _on_netease_search(ctx: _Lookup, sources, index, document, reply, error):
 
 
 def _request_netease_lyric(ctx: _Lookup, song, sources, index):
-    return ctx.api.web_service.get_url(
-        url=NETEASE_LYRIC_URL,
-        handler=partial(_on_netease_lyric, ctx, song, sources, index),
-        # Deliberately no parser: see _as_json().
-        parse_response_type=None,
-        unencoded_queryargs={'id': song.get('id'), 'lv': -1, 'kv': -1, 'tv': -1},
-        headers=dict(NETEASE_HEADERS),
-        priority=True,
+    return _netease_client(ctx.api).get(
+        NETEASE_LYRIC_URL,
+        {'id': song.get('id'), 'lv': -1, 'kv': -1, 'tv': -1},
+        partial(_on_netease_lyric, ctx, song, sources, index),
     )
 
 
