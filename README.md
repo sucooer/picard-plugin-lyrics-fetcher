@@ -11,6 +11,7 @@
 - 可选：任意格式都额外导出一份 `.lrc` 文件
 - 可选：已有歌词时不覆盖
 - 网易云：去掉歌词开头的制作人员信息（`作词 : XXX` 那一段）
+- 去掉只有时间轴、没有歌词的空行（`[00:02.552]` 这种）
 - 网易云：可选在每行后追加中文翻译，生成**双语歌词**
 - 可选歌词来源，默认「先用网易云，失败自动改用 LRCLIB」
 
@@ -69,6 +70,24 @@ picard-cli plugins install /path/to/picard-plugin-lrclib-lyrics
 
 所以默认是 **auto**：先查网易云，查不到再查 LRCLIB。实测 7 首中日英混合曲目
 **7/7 全部命中**，而只用 LRCLIB 是 6/7。
+
+### 网易云为什么走 HTTP/1.1
+
+Picard 的网络层默认协商 **HTTP/2**，而 `music.163.com` 的 CDN 会**掐断 Qt 的 HTTP/2
+连接**。用 Qt 6.11 实测：
+
+```
+搜索 HTTP/2 开启   #1  RemoteHostClosedError（卡 5.29 秒后失败）
+搜索 HTTP/2 开启   #2  OK
+搜索 HTTP/2 开启   #3  OK
+搜索 HTTP/1.1      #1  OK  0.52s
+搜索 HTTP/1.1      #2  OK  0.60s
+搜索 HTTP/1.1      #3  OK  0.50s
+```
+
+HTTP/1.1 不仅 3/3 成功，还快十倍。所以插件为网易云单独建了一个
+`QNetworkAccessManager`，关掉 `Http2AllowedAttribute`（仍遵循系统的代理设置）。
+LRCLIB 继续走 Picard 自带的 web service。
 
 ## 匹配策略
 
