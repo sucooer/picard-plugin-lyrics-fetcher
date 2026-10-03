@@ -15,9 +15,9 @@ Requirements:
 - The `syncedlyrics` tag is only supported for formats that can store it:
   ID3 (MP3) and Vorbis (FLAC, OGG, Opus). It is not supported for MP4/M4A.
 
-Note: LRCLIB matches tracks by artist, title, album and duration, not by
-MusicBrainz ID. Occasional mismatches are possible, so it is worth skimming
-the lyrics before saving.
+Note: LRCLIB matches tracks by artist, title and duration, not by
+MusicBrainz ID, and its coverage is not complete. Occasional misses and
+mismatches are possible, so it is worth skimming the lyrics before saving.
 """
 api = ["3.0"]
 authors = ["Generated with WorkBuddy AI"]
