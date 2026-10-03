@@ -57,6 +57,7 @@ BOOL_SETTINGS = (
     ('write_plain', True),
     ('never_replace', True),
     ('export_lrc', False),
+    ('auto_lrc_for_unsupported', True),
     ('lrc_never_replace', True),
     ('netease_strip_credits', True),
     ('netease_add_translation', False),
@@ -77,10 +78,14 @@ DEFAULTS.update(TEXT_SETTINGS)
 _LRC_TIME = re.compile(r'\[(\d+):(\d+(?:[.:]\d+)?)\]')
 # [ti:...] [ar:...] [al:...] [by:...] [offset:...] etc.
 _LRC_META = re.compile(r'^\[[a-zA-Z]+:.*\]$')
-# Credit lines such as "作词 : GAK-amazuti-" that NetEase prepends to lyrics.
+# Credit lines such as "作词 : GAK-amazuti-" or "混音工程师: You Yokoi" that
+# NetEase prepends to lyrics. Up to six characters may sit between the keyword
+# and the colon, which covers the common "...工程师" / "...制作人" suffixes.
 _CREDIT = re.compile(
-    r'^(作词|作曲|编曲|制作人|出品|监制|混音|母带|录音|录音师|录音室|和声|合声|'
-    r'吉他|贝斯|鼓|键盘|弦乐|钢琴|策划|统筹|发行|词|曲|编)\s*[:：]'
+    r'^(?:作词|作曲|编曲|词曲|制作人|出品人|出品|监制|混音|母带|录音|和声|合声|'
+    r'吉他|贝斯|鼓|键盘|弦乐|钢琴|策划|统筹|发行|OP|SP)'
+    r'[^:：]{0,6}[:：]',
+    re.IGNORECASE,
 )
 # NetEase covers are titled like "晴天（深情版）" or "Lemon (翻自 米津玄師)".
 _NETEASE_NOISE = re.compile(r'(翻自|翻唱|cover|纯音乐|伴奏|remix|钢琴版|吉他版)', re.IGNORECASE)
@@ -434,18 +439,23 @@ def _write_lyrics(ctx: _Lookup, description: str, synced: str, plain: str) -> No
 
     if synced and not can_store_synced:
         extension = os.path.splitext(ctx.file.filename)[1].lstrip('.').upper() or 'this'
-        if written:
-            api.logger.info(
-                'Lyrics: %s — %s files cannot store the syncedlyrics tag (Picard drops it). '
-                'Enable "Also export a .lrc file when saving" to keep the timestamps in a '
-                'sidecar file.',
-                os.path.basename(ctx.file.filename), extension,
-            )
-        else:
+        if not written:
             api.logger.warning(
                 'Lyrics: %s — %s files cannot store the syncedlyrics tag, and plain lyrics '
                 'were not written either. Enable "Write plain lyrics" and/or "Also export a '
                 '.lrc file when saving" in the Lyrics Fetcher options.',
+                os.path.basename(ctx.file.filename), extension,
+            )
+        elif _setting(api, 'auto_lrc_for_unsupported'):
+            api.logger.info(
+                'Lyrics: %s — %s files cannot store the syncedlyrics tag (Picard drops it), '
+                'so a .lrc sidecar file will be written when you save.',
+                os.path.basename(ctx.file.filename), extension,
+            )
+        else:
+            api.logger.info(
+                'Lyrics: %s — %s files cannot store the syncedlyrics tag (Picard drops it). '
+                'Enable "Also export a .lrc file when saving" to keep the timestamps.',
                 os.path.basename(ctx.file.filename), extension,
             )
     ctx.finish()
@@ -750,17 +760,24 @@ def _on_lrclib_search(ctx: _Lookup, sources, index, document, reply, error):
 
 def _on_file_saved(api: PluginApi, file) -> None:
     """Called after a file is saved: optionally write a .lrc sidecar file."""
-    if not _setting(api, 'enabled') or not _setting(api, 'export_lrc'):
+    if not _setting(api, 'enabled'):
         return
 
     metadata = file.metadata
     # Prefer the synced text we cached during the lookup: for formats that
     # cannot store the syncedlyrics tag this is the only copy left.
-    lyrics = (
-        metadata.get(SYNCED_CACHE_TAG)
-        or metadata.get('syncedlyrics')
-        or metadata.get('lyrics')
-    )
+    synced = metadata.get(SYNCED_CACHE_TAG) or metadata.get('syncedlyrics')
+    plain = metadata.get('lyrics')
+
+    if _setting(api, 'export_lrc'):
+        lyrics = synced or plain
+    elif _setting(api, 'auto_lrc_for_unsupported') and synced and not _supports_synced(file):
+        # The audio format cannot keep the timestamps in a tag, so the sidecar
+        # file is the only way to preserve them. Do it without being asked.
+        lyrics = synced
+    else:
+        return
+
     if not lyrics:
         return
 
@@ -822,6 +839,11 @@ class LrclibLyricsOptionsPage(OptionsPage):
         self.cb_export_lrc = QCheckBox(
             self._tr('option.export_lrc', 'Also export a .lrc file when saving')
         )
+        self.cb_auto_lrc = QCheckBox(self._tr(
+            'option.auto_lrc',
+            'Automatically export a .lrc sidecar for formats that cannot store synced '
+            'lyrics (FLAC, OGG, M4A)',
+        ))
         self.cb_lrc_never_replace = QCheckBox(
             self._tr('option.lrc_never_replace', 'Never replace an existing .lrc file')
         )
@@ -833,10 +855,10 @@ class LrclibLyricsOptionsPage(OptionsPage):
         note = QLabel(self._tr(
             'option.note',
             'Only MP3 (ID3) can store the "syncedlyrics" tag — FLAC, OGG/Opus and MP4/M4A '
-            'silently drop it, so for those enable "Write plain lyrics" and/or the .lrc '
-            'export. Neither source matches on MusicBrainz IDs, so mismatches are possible '
-            '— skim the lyrics before saving. NetEase uses undocumented web endpoints and '
-            'may stop working without notice.',
+            'silently drop it. For those the plugin writes plain lyrics and, by default, a '
+            '.lrc sidecar file holding the timestamps. Neither source matches on MusicBrainz '
+            'IDs, so mismatches are possible — skim the lyrics before saving. NetEase uses '
+            'undocumented web endpoints and may stop working without notice.',
         ))
         note.setWordWrap(True)
 
@@ -850,6 +872,7 @@ class LrclibLyricsOptionsPage(OptionsPage):
         layout.addWidget(self.cb_strip_credits)
         layout.addWidget(self.cb_add_translation)
         layout.addWidget(self.cb_export_lrc)
+        layout.addWidget(self.cb_auto_lrc)
         layout.addWidget(self.cb_lrc_never_replace)
         layout.addWidget(self.lbl_pattern)
         layout.addWidget(self.txt_pattern)
@@ -874,6 +897,7 @@ class LrclibLyricsOptionsPage(OptionsPage):
         self.cb_strip_credits.setChecked(bool(_setting(api, 'netease_strip_credits')))
         self.cb_add_translation.setChecked(bool(_setting(api, 'netease_add_translation')))
         self.cb_export_lrc.setChecked(bool(_setting(api, 'export_lrc')))
+        self.cb_auto_lrc.setChecked(bool(_setting(api, 'auto_lrc_for_unsupported')))
         self.cb_lrc_never_replace.setChecked(bool(_setting(api, 'lrc_never_replace')))
         self.txt_pattern.setText(_setting(api, 'lrc_filename') or DEFAULT_LRC_PATTERN)
         source = _setting(api, 'source')
@@ -889,6 +913,7 @@ class LrclibLyricsOptionsPage(OptionsPage):
         config['netease_strip_credits'] = self.cb_strip_credits.isChecked()
         config['netease_add_translation'] = self.cb_add_translation.isChecked()
         config['export_lrc'] = self.cb_export_lrc.isChecked()
+        config['auto_lrc_for_unsupported'] = self.cb_auto_lrc.isChecked()
         config['lrc_never_replace'] = self.cb_lrc_never_replace.isChecked()
         config['lrc_filename'] = self.txt_pattern.text().strip() or DEFAULT_LRC_PATTERN
         config['source'] = self.cmb_source.currentData() or SOURCE_AUTO
