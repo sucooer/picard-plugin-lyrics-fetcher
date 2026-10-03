@@ -9,6 +9,7 @@
 "option.strip_credits" = "NetEase: drop the leading credits block (作词/作曲/编曲 …)"
 "option.add_translation" = "NetEase: append the Chinese translation to each line (bilingual lyrics)"
 "option.export_lrc" = "Also export a .lrc file when saving"
+"option.auto_lrc" = "Automatically export a .lrc sidecar for formats that cannot store synced lyrics (FLAC, OGG, M4A)"
 "option.lrc_never_replace" = "Never replace an existing .lrc file"
 "option.lrc_filename" = "Name pattern for the .lrc file:"
-"option.note" = "Only MP3 (ID3) can store the \"syncedlyrics\" tag — FLAC, OGG/Opus and MP4/M4A silently drop it, so for those enable \"Write plain lyrics\" and/or the .lrc export. Neither source matches on MusicBrainz IDs, so mismatches are possible — skim the lyrics before saving. NetEase uses undocumented web endpoints and may stop working without notice."
+"option.note" = "Only MP3 (ID3) can store the \"syncedlyrics\" tag — FLAC, OGG/Opus and MP4/M4A silently drop it. For those the plugin writes plain lyrics and, by default, a .lrc sidecar file holding the timestamps. Neither source matches on MusicBrainz IDs, so mismatches are possible — skim the lyrics before saving. NetEase uses undocumented web endpoints and may stop working without notice."
