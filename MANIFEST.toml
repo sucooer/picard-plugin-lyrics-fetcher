@@ -1,23 +1,30 @@
 uuid = "3431b825-145a-4696-9785-542dea651391"
-name = "LRCLIB Lyrics"
-description = "Fetch synced and plain lyrics from lrclib.net and write them to your files"
+name = "Lyrics Fetcher"
+description = "Fetch synced and plain lyrics from NetEase Cloud Music and LRCLIB"
 long_description = """
-Fetches lyrics from [LRCLIB](https://lrclib.net) and writes them into your audio files.
+Fetches lyrics from **NetEase Cloud Music** and **LRCLIB** and writes them into your audio files.
 
 Features:
 - Writes **synced lyrics** (with timestamps) to the `syncedlyrics` tag
 - Writes **plain lyrics** to the `lyrics` tag
 - Optionally exports a `.lrc` sidecar file next to the audio file
 - Option to never overwrite lyrics that are already present
+- NetEase: drops the leading credits block (作词/作曲/编曲 …) from the lyrics
+- NetEase: can append the Chinese translation to each line (bilingual lyrics)
+- Choose the source, or use "NetEase first, then LRCLIB" so that a miss in one
+  is automatically retried against the other
 
 Requirements:
 - MusicBrainz Picard 3.0 or newer
 - The `syncedlyrics` tag is only supported for formats that can store it:
   ID3 (MP3) and Vorbis (FLAC, OGG, Opus). It is not supported for MP4/M4A.
 
-Note: LRCLIB matches tracks by artist, title and duration, not by
-MusicBrainz ID, and its coverage is not complete. Occasional misses and
-mismatches are possible, so it is worth skimming the lyrics before saving.
+Caveats:
+- Neither source matches on MusicBrainz IDs; they match on artist, title and
+  duration, and their coverage is not complete. Mismatches are possible, so it
+  is worth skimming the lyrics before saving.
+- NetEase is used through its public web endpoints. These are undocumented and
+  may change or start refusing requests without notice.
 """
 api = ["3.0"]
 authors = ["Generated with WorkBuddy AI"]
