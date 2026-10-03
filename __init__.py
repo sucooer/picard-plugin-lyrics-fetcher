@@ -78,17 +78,21 @@ DEFAULTS = dict(BOOL_SETTINGS)
 DEFAULTS.update(TEXT_SETTINGS)
 
 # [mm:ss.xx] / [mm:ss.xxx] / [mm:ss:xx] (NetEase uses the last form on occasion)
-_LRC_TIME = re.compile(r'\[(\d+):(\d+(?:[.:]\d+)?)\]')
+# and oddities such as [00:00.00-1], hence the [^\]]* before the closing bracket.
+_LRC_TIME = re.compile(r'\[(\d+):(\d+(?:[.:]\d+)?)[^\]]*\]')
 # [ti:...] [ar:...] [al:...] [by:...] [offset:...] etc.
 _LRC_META = re.compile(r'^\[[a-zA-Z]+:.*\]$')
-# Credit lines such as "作词 : GAK-amazuti-" or "混音工程师: You Yokoi" that
-# NetEase prepends to lyrics. Up to six characters may sit between the keyword
-# and the colon, which covers the common "...工程师" / "...制作人" suffixes.
-# The keyword list is shared with the MusicMetaCleaner project.
+# Credit lines such as "作词 : GAK-amazuti-" or "混音工程师: You Yokoi".
+# Up to six characters may sit between the keyword and the colon, which covers
+# the common "...工程师" / "...制作人" suffixes. The keyword list is shared with
+# the MusicMetaCleaner project.
+#
+# The single-character labels 词 / 曲 / 詞 and the short 词曲 are deliberately
+# NOT here: see _CREDIT_SINGLE below.
 _CREDIT = re.compile(
     r'^(?:'
     # Simplified Chinese
-    r'作词|词|填词|歌词|作曲|曲|谱曲|词曲|编曲|配器|和声|和音|配唱|'
+    r'作词|填词|歌词|作曲|谱曲|编曲|配器|和声|和音|配唱|'
     r'演唱|歌手|主唱|合唱|制作|制作人|监制|制片|'
     r'录音|录音师|录音棚|录音室|混音|缩混|混音师|后期|母带|母带工程师|母带处理|'
     r'文案|策划|统筹|推广|宣传|企划|发行|发行方|发行公司|'
@@ -96,7 +100,7 @@ _CREDIT = re.compile(
     r'鸣谢|特别鸣谢|提供|作品|词作者|曲作者|编者|翻译|译者|歌词翻译|音译|'
     r'LRC|歌词制作|歌词编辑|OP|SP|'
     # Traditional Chinese
-    r'作詞|詞|編曲|詩曲|'
+    r'作詞|編曲|詩曲|'
     # English
     r'Produced by|Lyrics by|Composed by|Lyricist|Composer|Arranger|Arrangement|'
     r'Written by|Music by|Words by|Artist|Singer|Vocal|Vocals|Performed by|'
@@ -113,6 +117,15 @@ _CREDIT = re.compile(
     r')[^:：]{0,6}[:：]',
     re.IGNORECASE,
 )
+
+# Single-character (and one short) labels. "词不达意: ..." and "曲终人散: ..."
+# are perfectly good lyric lines, so these are handled separately:
+#   - inside the leading block the usual short gap is allowed, because that
+#     region is credits by construction;
+#   - anywhere else the colon must follow immediately, so "词：XXX" is still
+#     removed but "词不达意: ..." is kept.
+_CREDIT_SINGLE = re.compile(r'^(?:词|曲|詞|词曲)[^:：]{0,6}[:：]')
+_CREDIT_SINGLE_STRICT = re.compile(r'^(?:词|曲|詞|词曲)\s*[:：]')
 
 # Credits that never carry a colon, so the rule above cannot see them:
 # "Produced by X", "Feat. Y", "© 2026 Sony", "未经许可，不得翻唱或使用".
@@ -272,40 +285,65 @@ def _drop_empty_lines(lrc: str) -> str:
 
 
 def _strip_credits(lrc: str) -> str:
-    """Drop the credit block NetEase prepends to the lyrics.
+    """Remove credit and metadata lines, wherever they appear.
 
-    NetEase lyrics normally open with lines such as
-    ``[00:00.000] 作词 : GAK-amazuti-`` before the first real lyric line. Only
-    the *leading* block is removed, and only when every line in it looks like a
-    credit, an LRC metadata tag or a bare timestamp, so a song whose first line
-    happens to start with "作曲" is not damaged.
+    NetEase uploaders normally put this junk above the first lyric line, but
+    they also scatter it through the song or dump it at the end
+    ("歌词制作：XXX"), so the whole file is scanned rather than just the opening
+    block.
 
-    The keyword list lives in _CREDIT and _CREDIT_BARE. The colon requirement
-    in _CREDIT is what keeps ordinary lyric lines safe: "作曲家的名字" and
-    "OPを探して" have no colon and are therefore kept.
+    Three safeguards keep real lyric lines safe:
+
+    * every keyword needs a colon, so "作曲家的名字" and "OPを探して" survive;
+    * the ambiguous single-character labels 词 / 曲 / 詞 / 词曲 are only matched
+      loosely inside the leading block - elsewhere they need the colon
+      immediately, so "词不达意: ..." is kept but "词：XXX" is removed;
+    * if stripping would leave nothing behind, the original is returned.
     """
     lines = lrc.splitlines()
-    index = 0
-    while index < len(lines):
-        stripped = lines[index].strip()
-        if not stripped:
-            index += 1
-            continue
+    kept = []
+    leading = True
+    removed = False
+
+    for line in lines:
+        stripped = line.strip()
         text = _line_text(stripped)
-        # A bare timestamp line ("[00:02.552]") belongs to the leading block
-        # too - stopping on one of those used to leave the credits in place.
-        if (
+
+        if leading:
+            # The opening block is credits by construction, so blank lines,
+            # LRC metadata tags, bare timestamps and the loose single-character
+            # labels all count as part of it.
+            if (
+                not stripped
+                or _LRC_META.match(stripped)
+                or not text
+                or _CREDIT.match(text)
+                or _CREDIT_BARE.match(text)
+                or _CREDIT_SINGLE.match(text)
+            ):
+                removed = True
+                continue
+            leading = False
+
+        if stripped and (
             _LRC_META.match(stripped)
-            or not text
             or _CREDIT.match(text)
             or _CREDIT_BARE.match(text)
+            or _CREDIT_SINGLE_STRICT.match(text)
         ):
-            index += 1
+            removed = True
             continue
-        break
-    if index >= len(lines):
-        return lrc  # everything looked like a credit; keep it
-    return '\n'.join(lines[index:])
+
+        kept.append(line)
+
+    if not removed:
+        return lrc
+    if not any(entry.strip() for entry in kept):
+        # The whole thing was credits, so the track has no lyrics at all.
+        # Returning '' lets the caller treat it as a miss instead of writing
+        # the credit line into the tags.
+        return ''
+    return '\n'.join(kept)
 
 
 def _merge_translation(lrc: str, translation: str, separator: str = ' / ') -> str:
@@ -841,6 +879,11 @@ def _on_netease_lyric(ctx: _Lookup, song, sources, index, document, reply, error
 
     if _setting(ctx.api, 'clean_lyrics'):
         lrc = _strip_credits(lrc)
+        if not lrc:
+            ctx.api.logger.info(
+                'Lyrics: NetEase has credits but no lyrics for %s', ctx.file.filename
+            )
+            return _dispatch(ctx, sources, index + 1)
 
     if _setting(ctx.api, 'netease_add_translation'):
         translation = ((document.get('tlyric') or {}).get('lyric') or '').strip()
