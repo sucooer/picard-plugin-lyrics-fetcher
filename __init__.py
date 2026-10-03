@@ -18,7 +18,7 @@ import re
 from functools import partial
 
 from PyQt6 import QtCore, QtNetwork
-from PyQt6.QtWidgets import QCheckBox, QComboBox, QLabel, QLineEdit, QVBoxLayout
+from PyQt6.QtWidgets import QCheckBox, QComboBox, QLabel, QVBoxLayout
 
 from picard.config import BoolOption, TextOption
 from picard.plugin3.api import BaseAction, OptionsPage, PluginApi
@@ -47,29 +47,28 @@ NETEASE_HEADERS = {
 }
 NETEASE_SEARCH_LIMIT = 10
 
-DEFAULT_LRC_PATTERN = '%filename%.lrc'
+LRC_NAME_PATTERN = '%filename%.lrc'
+
 SOURCE_AUTO = 'auto'
 SOURCE_NETEASE = 'netease'
 SOURCE_LRCLIB = 'lrclib'
 
-# (setting name, default value)
+LRC_NEVER = 'never'
+LRC_UNSUPPORTED = 'unsupported'
+LRC_ALWAYS = 'always'
+
+# The whole option surface: six settings, deliberately kept small. Related
+# behaviours share one switch rather than exposing every internal flag.
 BOOL_SETTINGS = (
-    ('enabled', True),
-    ('write_synced', True),
-    ('write_plain', True),
-    ('timed_lyrics_in_tag', True),
-    ('strip_empty_lrc_lines', True),
-    ('never_replace', True),
-    ('export_lrc', False),
-    ('auto_lrc_for_unsupported', True),
-    ('lrc_never_replace', True),
-    ('netease_strip_credits', True),
+    ('write_tags', True),
+    ('clean_lyrics', True),
     ('netease_add_translation', False),
+    ('never_replace', True),
 )
 
 TEXT_SETTINGS = (
-    ('lrc_filename', DEFAULT_LRC_PATTERN),
     ('source', SOURCE_AUTO),
+    ('lrc_mode', LRC_NEVER),
 )
 
 # Fallbacks used when a setting is somehow not registered, so that a failure to
@@ -217,8 +216,8 @@ def _drop_empty_lines(lrc: str) -> str:
     """Remove LRC lines that carry a timestamp but no lyric text.
 
     NetEase emits these to blank the display during instrumental passages. They
-    look like debris in the file, so they are dropped by default; the setting
-    ``strip_empty_lrc_lines`` turns that off for players that rely on them.
+    look like debris in the file, so they are dropped. Driven by the
+    ``clean_lyrics`` setting, together with _strip_credits().
     """
     kept = []
     for line in lrc.splitlines():
@@ -283,15 +282,10 @@ def _merge_translation(lrc: str, translation: str, separator: str = ' / ') -> st
     return '\n'.join(out)
 
 
-def _lrc_path(api: PluginApi, file) -> str:
-    """Build the .lrc output path from the configured name pattern."""
-    pattern = _setting(api, 'lrc_filename') or DEFAULT_LRC_PATTERN
+def _lrc_path(file) -> str:
+    """The .lrc path for a file: same directory, same base name."""
     base, _extension = os.path.splitext(file.filename)
-    directory, name = os.path.split(base)
-    path = pattern.replace('%folderpath%', directory).replace('%filename%', name)
-    if not os.path.isabs(path):
-        path = os.path.join(directory, path)
-    return path
+    return base + '.lrc'
 
 
 # Formats that cannot store the syncedlyrics tag. Picard lists it in their
@@ -444,7 +438,7 @@ def _write_lyrics(ctx: _Lookup, description: str, synced: str, plain: str) -> No
 
     synced = (synced or '').strip()
     plain = (plain or '').strip()
-    if synced and _setting(api, 'strip_empty_lrc_lines'):
+    if synced and _setting(api, 'clean_lyrics'):
         synced = _drop_empty_lines(synced)
     if not plain and synced:
         plain = _lrc_to_plain(synced)
@@ -452,18 +446,13 @@ def _write_lyrics(ctx: _Lookup, description: str, synced: str, plain: str) -> No
     can_store_synced = _supports_synced(ctx.file)
     replace = ctx.force or not _setting(api, 'never_replace')
 
-    # Formats such as FLAC, OGG and M4A have no field for synced lyrics at all.
-    # When asked, put the LRC text into the plain lyrics tag instead, so the
-    # timestamps are still stored inside the file and not only in the sidecar.
-    timed_in_tag = (
-        not can_store_synced
-        and bool(synced)
-        and _setting(api, 'timed_lyrics_in_tag')
-    )
+    # Formats such as FLAC, OGG and M4A have no field for synced lyrics at all,
+    # so the timed text goes into the plain lyrics tag instead. That way the
+    # timestamps are stored inside the file and not only in a sidecar.
+    timed_in_tag = bool(synced) and not can_store_synced
     tag_lyrics = synced if timed_in_tag else plain
 
-    # Keep the synced text for the .lrc export even when the format cannot
-    # store it in a tag.
+    # Keep the synced text for a possible .lrc export.
     if synced:
         try:
             metadata[SYNCED_CACHE_TAG] = synced
@@ -472,12 +461,11 @@ def _write_lyrics(ctx: _Lookup, description: str, synced: str, plain: str) -> No
 
     written = []
     tag_written = False
-    if _setting(api, 'write_synced') and synced and can_store_synced:
-        if replace or not metadata.get('syncedlyrics'):
+    if _setting(api, 'write_tags'):
+        if synced and can_store_synced and (replace or not metadata.get('syncedlyrics')):
             metadata['syncedlyrics'] = synced
             written.append('syncedlyrics')
-    if _setting(api, 'write_plain') and tag_lyrics:
-        if replace or not metadata.get('lyrics'):
+        if tag_lyrics and (replace or not metadata.get('lyrics')):
             metadata['lyrics'] = tag_lyrics
             tag_written = True
             written.append('lyrics (with timestamps)' if timed_in_tag else 'lyrics')
@@ -489,11 +477,8 @@ def _write_lyrics(ctx: _Lookup, description: str, synced: str, plain: str) -> No
     else:
         api.logger.info('Lyrics: nothing to write for %s', ctx.file.filename)
 
-    # Write the .lrc straight away. For formats that cannot store the
-    # syncedlyrics tag this is the only place the timestamps can live, and it
-    # means the user does not have to remember to save first.
-    if _setting(api, 'enabled'):
-        _export_lrc(api, ctx.file)
+    # Write the .lrc straight away, when the user asked for one.
+    _export_lrc(api, ctx.file)
 
     # Nothing calls File.update() after the addition-to-track processors run, so
     # without this the track would never be shown as changed in Picard.
@@ -502,37 +487,13 @@ def _write_lyrics(ctx: _Lookup, description: str, synced: str, plain: str) -> No
     except Exception:  # pragma: no cover - defensive
         pass
 
-    if synced and not can_store_synced:
-        extension = os.path.splitext(ctx.file.filename)[1].lstrip('.').upper() or 'this'
-        name = os.path.basename(ctx.file.filename)
-        sidecar_enabled = (
-            _setting(api, 'auto_lrc_for_unsupported') or _setting(api, 'export_lrc')
+    if synced and not can_store_synced and not tag_written:
+        api.logger.info(
+            'Lyrics: %s — %s files cannot store the syncedlyrics tag and nothing was written '
+            'to the lyrics tag either; enable "Write lyrics into the audio tags".',
+            os.path.basename(ctx.file.filename),
+            os.path.splitext(ctx.file.filename)[1].lstrip('.').upper() or 'this',
         )
-        if timed_in_tag and tag_written:
-            api.logger.info(
-                'Lyrics: %s — %s has no field for synced lyrics, so the timed lyrics went '
-                'into the "lyrics" tag%s.',
-                name, extension,
-                ' (and the .lrc sidecar)' if sidecar_enabled else '',
-            )
-        elif not sidecar_enabled:
-            api.logger.info(
-                'Lyrics: %s — %s files cannot store the syncedlyrics tag (Picard drops it). '
-                'Enable "Also export a .lrc file when saving" to keep the timestamps.',
-                name, extension,
-            )
-        elif not written:
-            api.logger.info(
-                'Lyrics: %s — %s files cannot store the syncedlyrics tag; the timestamps are '
-                'in the .lrc sidecar. Enable "Write plain lyrics" to also fill the lyrics tag.',
-                name, extension,
-            )
-        else:
-            api.logger.info(
-                'Lyrics: %s — %s files cannot store the syncedlyrics tag (Picard drops it), '
-                'so the timestamps went into the .lrc sidecar file.',
-                name, extension,
-            )
     ctx.finish()
 
 
@@ -721,9 +682,7 @@ _auto_hook_reported = False
 def _on_file_added(api: PluginApi, track, file) -> None:
     """Called when a file is added to a track: look the lyrics up."""
     global _auto_hook_reported
-    if not _setting(api, 'enabled'):
-        return
-    if not (_setting(api, 'write_synced') or _setting(api, 'write_plain')):
+    if not _setting(api, 'write_tags'):
         return
 
     if not _auto_hook_reported:
@@ -827,7 +786,7 @@ def _on_netease_lyric(ctx: _Lookup, song, sources, index, document, reply, error
     if not lrc:
         return _dispatch(ctx, sources, index + 1)
 
-    if _setting(ctx.api, 'netease_strip_credits'):
+    if _setting(ctx.api, 'clean_lyrics'):
         lrc = _strip_credits(lrc)
 
     if _setting(ctx.api, 'netease_add_translation'):
@@ -903,27 +862,25 @@ def _on_lrclib_search(ctx: _Lookup, sources, index, document, reply, error):
 # ---------------------------------------------------------------------------
 
 def _export_lrc(api: PluginApi, file) -> None:
-    """Write the .lrc sidecar file, if the settings call for it."""
-    metadata = file.metadata
-    # Prefer the synced text we cached during the lookup: for formats that
-    # cannot store the syncedlyrics tag this is the only copy left.
-    synced = metadata.get(SYNCED_CACHE_TAG) or metadata.get('syncedlyrics')
-    plain = metadata.get('lyrics')
-
-    if _setting(api, 'export_lrc'):
-        lyrics = synced or plain
-    elif _setting(api, 'auto_lrc_for_unsupported') and synced and not _supports_synced(file):
-        # The audio format cannot keep the timestamps in a tag, so the sidecar
-        # file is the only way to preserve them. Do it without being asked.
-        lyrics = synced
-    else:
+    """Write the .lrc sidecar file when the settings call for one."""
+    mode = (_setting(api, 'lrc_mode') or LRC_NEVER).lower()
+    if mode == LRC_NEVER:
+        return
+    if mode == LRC_UNSUPPORTED and _supports_synced(file):
         return
 
+    metadata = file.metadata
+    lyrics = (
+        metadata.get(SYNCED_CACHE_TAG)
+        or metadata.get('syncedlyrics')
+        or metadata.get('lyrics')
+    )
     if not lyrics:
         return
 
-    path = _lrc_path(api, file)
-    if _setting(api, 'lrc_never_replace') and os.path.exists(path):
+    path = _lrc_path(file)
+    if os.path.exists(path):
+        # Never clobber a sidecar the user may have edited or downloaded.
         return
 
     try:
@@ -936,11 +893,7 @@ def _export_lrc(api: PluginApi, file) -> None:
 
 
 def _on_file_saved(api: PluginApi, file) -> None:
-    """Called after a file is saved: refresh the .lrc sidecar."""
-    if not _setting(api, 'enabled'):
-        return
-    # The sidecar is normally already written when the lookup finished; this
-    # run picks up a file that got renamed by Picard during the save.
+    """Called after a file is saved: refresh the .lrc sidecar if asked for."""
     _export_lrc(api, file)
 
 
@@ -957,8 +910,6 @@ class LrclibLyricsOptionsPage(OptionsPage):
         super().__init__(parent)
         self._api = getattr(self, 'api', None)
 
-        self.cb_enabled = QCheckBox(self._tr('option.enabled', 'Fetch lyrics automatically'))
-
         self.lbl_source = QLabel(self._tr('option.source', 'Lyrics source:'))
         self.cmb_source = QComboBox()
         self.cmb_source.addItem(
@@ -967,77 +918,49 @@ class LrclibLyricsOptionsPage(OptionsPage):
         self.cmb_source.addItem(self._tr('option.source.netease', 'NetEase only'), SOURCE_NETEASE)
         self.cmb_source.addItem(self._tr('option.source.lrclib', 'LRCLIB only'), SOURCE_LRCLIB)
 
-        self.cb_write_synced = QCheckBox(self._tr(
-            'option.write_synced', 'Write synced lyrics (with timestamps) to "syncedlyrics"'
-        ))
-        self.cb_write_plain = QCheckBox(
-            self._tr('option.write_plain', 'Write plain lyrics to "lyrics"')
+        self.cb_write_tags = QCheckBox(
+            self._tr('option.write_tags', 'Write lyrics into the audio tags')
         )
-        self.cb_timed_in_tag = QCheckBox(self._tr(
-            'option.timed_lyrics_in_tag',
-            'For formats with no synced-lyrics field (FLAC, OGG, M4A), put the timed lyrics '
-            'into the "lyrics" tag',
+        self.cb_clean = QCheckBox(self._tr(
+            'option.clean_lyrics', 'Tidy the lyrics (drop credits and empty timestamp lines)'
         ))
-        self.cb_strip_empty = QCheckBox(self._tr(
-            'option.strip_empty_lrc_lines',
-            'Drop timestamp-only lines that carry no lyric text',
+        self.cb_translation = QCheckBox(self._tr(
+            'option.add_translation', 'NetEase: append the Chinese translation (bilingual lyrics)'
         ))
         self.cb_never_replace = QCheckBox(
             self._tr('option.never_replace', 'Never replace lyrics that are already present')
         )
 
-        self.cb_strip_credits = QCheckBox(self._tr(
-            'option.strip_credits',
-            'NetEase: drop the leading credits block (作词/作曲/编曲 …)',
-        ))
-        self.cb_add_translation = QCheckBox(self._tr(
-            'option.add_translation',
-            'NetEase: append the Chinese translation to each line (bilingual lyrics)',
-        ))
-
-        self.cb_export_lrc = QCheckBox(
-            self._tr('option.export_lrc', 'Also export a .lrc file when saving')
+        self.lbl_lrc = QLabel(self._tr('option.lrc_mode', 'Export a .lrc sidecar file:'))
+        self.cmb_lrc = QComboBox()
+        self.cmb_lrc.addItem(self._tr('option.lrc.never', 'Never'), LRC_NEVER)
+        self.cmb_lrc.addItem(
+            self._tr(
+                'option.lrc.unsupported',
+                'Only for formats whose tags cannot hold the timestamps',
+            ),
+            LRC_UNSUPPORTED,
         )
-        self.cb_auto_lrc = QCheckBox(self._tr(
-            'option.auto_lrc',
-            'Automatically export a .lrc sidecar for formats that cannot store synced '
-            'lyrics (FLAC, OGG, M4A)',
-        ))
-        self.cb_lrc_never_replace = QCheckBox(
-            self._tr('option.lrc_never_replace', 'Never replace an existing .lrc file')
-        )
-        self.lbl_pattern = QLabel(
-            self._tr('option.lrc_filename', 'Name pattern for the .lrc file:')
-        )
-        self.txt_pattern = QLineEdit()
+        self.cmb_lrc.addItem(self._tr('option.lrc.always', 'Always'), LRC_ALWAYS)
 
         note = QLabel(self._tr(
             'option.note',
             'Only MP3 (ID3) has a real field for synced lyrics. FLAC, OGG/Opus and MP4/M4A '
-            'silently drop the "syncedlyrics" tag, so for those the plugin puts the timed '
-            'lyrics into the "lyrics" tag and writes a .lrc sidecar file. Neither source '
-            'matches on MusicBrainz IDs, so mismatches are possible — skim the lyrics before '
-            'saving. NetEase uses undocumented web endpoints and may stop working without '
-            'notice.',
+            'silently drop the "syncedlyrics" tag, so for those the timed lyrics go into the '
+            '"lyrics" tag instead. Neither source matches on MusicBrainz IDs, so mismatches '
+            'are possible — skim the lyrics before saving.',
         ))
         note.setWordWrap(True)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(self.cb_enabled)
         layout.addWidget(self.lbl_source)
         layout.addWidget(self.cmb_source)
-        layout.addWidget(self.cb_write_synced)
-        layout.addWidget(self.cb_write_plain)
-        layout.addWidget(self.cb_timed_in_tag)
-        layout.addWidget(self.cb_strip_empty)
+        layout.addWidget(self.cb_write_tags)
+        layout.addWidget(self.cb_clean)
+        layout.addWidget(self.cb_translation)
         layout.addWidget(self.cb_never_replace)
-        layout.addWidget(self.cb_strip_credits)
-        layout.addWidget(self.cb_add_translation)
-        layout.addWidget(self.cb_export_lrc)
-        layout.addWidget(self.cb_auto_lrc)
-        layout.addWidget(self.cb_lrc_never_replace)
-        layout.addWidget(self.lbl_pattern)
-        layout.addWidget(self.txt_pattern)
+        layout.addWidget(self.lbl_lrc)
+        layout.addWidget(self.cmb_lrc)
         layout.addWidget(note)
         layout.addStretch()
 
@@ -1050,39 +973,28 @@ class LrclibLyricsOptionsPage(OptionsPage):
         except Exception:  # pragma: no cover - defensive
             return text
 
+    @staticmethod
+    def _select(combo, value, fallback):
+        index = combo.findData(value)
+        combo.setCurrentIndex(index if index >= 0 else combo.findData(fallback))
+
     def load(self) -> None:
         api = self._api
-        self.cb_enabled.setChecked(bool(_setting(api, 'enabled')))
-        self.cb_write_synced.setChecked(bool(_setting(api, 'write_synced')))
-        self.cb_write_plain.setChecked(bool(_setting(api, 'write_plain')))
-        self.cb_timed_in_tag.setChecked(bool(_setting(api, 'timed_lyrics_in_tag')))
-        self.cb_strip_empty.setChecked(bool(_setting(api, 'strip_empty_lrc_lines')))
+        self.cb_write_tags.setChecked(bool(_setting(api, 'write_tags')))
+        self.cb_clean.setChecked(bool(_setting(api, 'clean_lyrics')))
+        self.cb_translation.setChecked(bool(_setting(api, 'netease_add_translation')))
         self.cb_never_replace.setChecked(bool(_setting(api, 'never_replace')))
-        self.cb_strip_credits.setChecked(bool(_setting(api, 'netease_strip_credits')))
-        self.cb_add_translation.setChecked(bool(_setting(api, 'netease_add_translation')))
-        self.cb_export_lrc.setChecked(bool(_setting(api, 'export_lrc')))
-        self.cb_auto_lrc.setChecked(bool(_setting(api, 'auto_lrc_for_unsupported')))
-        self.cb_lrc_never_replace.setChecked(bool(_setting(api, 'lrc_never_replace')))
-        self.txt_pattern.setText(_setting(api, 'lrc_filename') or DEFAULT_LRC_PATTERN)
-        source = _setting(api, 'source')
-        index = self.cmb_source.findData(source)
-        self.cmb_source.setCurrentIndex(index if index >= 0 else 0)
+        self._select(self.cmb_source, _setting(api, 'source'), SOURCE_AUTO)
+        self._select(self.cmb_lrc, _setting(api, 'lrc_mode'), LRC_NEVER)
 
     def save(self) -> None:
         config = self._api.plugin_config
-        config['enabled'] = self.cb_enabled.isChecked()
-        config['write_synced'] = self.cb_write_synced.isChecked()
-        config['write_plain'] = self.cb_write_plain.isChecked()
-        config['timed_lyrics_in_tag'] = self.cb_timed_in_tag.isChecked()
-        config['strip_empty_lrc_lines'] = self.cb_strip_empty.isChecked()
+        config['write_tags'] = self.cb_write_tags.isChecked()
+        config['clean_lyrics'] = self.cb_clean.isChecked()
+        config['netease_add_translation'] = self.cb_translation.isChecked()
         config['never_replace'] = self.cb_never_replace.isChecked()
-        config['netease_strip_credits'] = self.cb_strip_credits.isChecked()
-        config['netease_add_translation'] = self.cb_add_translation.isChecked()
-        config['export_lrc'] = self.cb_export_lrc.isChecked()
-        config['auto_lrc_for_unsupported'] = self.cb_auto_lrc.isChecked()
-        config['lrc_never_replace'] = self.cb_lrc_never_replace.isChecked()
-        config['lrc_filename'] = self.txt_pattern.text().strip() or DEFAULT_LRC_PATTERN
         config['source'] = self.cmb_source.currentData() or SOURCE_AUTO
+        config['lrc_mode'] = self.cmb_lrc.currentData() or LRC_NEVER
 
 
 # ---------------------------------------------------------------------------
