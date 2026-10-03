@@ -46,6 +46,9 @@ NETEASE_HEADERS = {
     'Cookie': 'appver=2.0.2; os=pc',
 }
 NETEASE_SEARCH_LIMIT = 10
+# How many matching entries to keep for the lyric lookup. NetEase often has the
+# same track under several releases and only some of them carry lyrics.
+NETEASE_CANDIDATES = 4
 
 LRC_NAME_PATTERN = '%filename%.lrc'
 
@@ -448,7 +451,12 @@ def _pick_lrclib(results, title, artist, duration):
 
 
 def _pick_netease(songs, title, artist, duration):
-    """Choose the best matching song from a NetEase search result list.
+    """Rank the NetEase search results that match this track, best first.
+
+    NetEase routinely carries the same track several times - the album release,
+    the single, a compilation - and one of those entries may have lyrics while
+    another only has a credit line. So the caller works down the list rather
+    than committing to a single match.
 
     NetEase durations are in milliseconds. Covers and edits are titled
     differently ("晴天（深情版）"), so the exact title match already filters out
@@ -475,7 +483,7 @@ def _pick_netease(songs, title, artist, duration):
         candidates.append(song)
 
     if not candidates:
-        return None
+        return []
 
     def rank(song):
         noisy = 1 if _NETEASE_NOISE.search(song.get('name') or '') else 0
@@ -489,7 +497,7 @@ def _pick_netease(songs, title, artist, duration):
         return (noisy, delta)
 
     candidates.sort(key=rank)
-    return candidates[0]
+    return candidates[:NETEASE_CANDIDATES]
 
 
 # ---------------------------------------------------------------------------
@@ -840,50 +848,56 @@ def _on_netease_search(ctx: _Lookup, sources, index, document, reply, error):
         return _dispatch(ctx, sources, index + 1)
 
     metadata = ctx.file.metadata
-    best = _pick_netease(
+    candidates = _pick_netease(
         songs, metadata.get('title'), metadata.get('artist'), _duration_seconds(metadata)
     )
-    if best is None:
+    if not candidates:
         ctx.api.logger.info(
             'Lyrics: NetEase returned %d results for %s but none matched title/artist',
             len(songs), ctx.file.filename,
         )
         return _dispatch(ctx, sources, index + 1)
 
-    return _request_netease_lyric(ctx, best, sources, index)
+    return _request_netease_lyric(ctx, candidates, sources, index)
 
 
-def _request_netease_lyric(ctx: _Lookup, song, sources, index):
+def _request_netease_lyric(ctx: _Lookup, candidates, sources, index):
+    song = candidates[0]
     return _netease_client(ctx.api).get(
         NETEASE_LYRIC_URL,
         {'id': song.get('id'), 'lv': -1, 'kv': -1, 'tv': -1},
-        partial(_on_netease_lyric, ctx, song, sources, index),
+        partial(_on_netease_lyric, ctx, candidates, sources, index),
     )
 
 
-def _on_netease_lyric(ctx: _Lookup, song, sources, index, document, reply, error):
+def _on_netease_lyric(ctx: _Lookup, candidates, sources, index, document, reply, error):
+    song = candidates[0]
     document = _as_json(document)
     if error or not isinstance(document, dict):
         return _retry_or_advance(
             ctx, sources, index, 'NetEase lyrics',
-            partial(_request_netease_lyric, ctx, song, sources, index),
+            partial(_request_netease_lyric, ctx, candidates, sources, index),
         )
 
-    if document.get('nolyric') or document.get('uncollected'):
+    lrc = '' if document.get('nolyric') or document.get('uncollected') else (
+        (document.get('lrc') or {}).get('lyric') or ''
+    ).strip()
+    if lrc and _setting(ctx.api, 'clean_lyrics'):
+        lrc = _strip_credits(lrc)
+
+    if not lrc:
+        # This release has no usable lyrics. NetEase very often has the same
+        # track under another release that does - the album entry may carry
+        # only a credit line while the single carries the full text.
+        remaining = candidates[1:]
+        if remaining:
+            ctx.api.logger.info(
+                'Lyrics: NetEase entry %s for %s has no lyrics, trying the next match',
+                song.get('id'), ctx.file.filename,
+            )
+            return _request_netease_lyric(ctx, remaining, sources, index)
         ctx.api.logger.info('Lyrics: NetEase has no lyrics for %s', ctx.file.filename)
         return _dispatch(ctx, sources, index + 1)
-
-    lrc = ((document.get('lrc') or {}).get('lyric') or '').strip()
-    if not lrc:
-        return _dispatch(ctx, sources, index + 1)
-
-    if _setting(ctx.api, 'clean_lyrics'):
-        lrc = _strip_credits(lrc)
-        if not lrc:
-            ctx.api.logger.info(
-                'Lyrics: NetEase has credits but no lyrics for %s', ctx.file.filename
-            )
-            return _dispatch(ctx, sources, index + 1)
 
     if _setting(ctx.api, 'netease_add_translation'):
         translation = ((document.get('tlyric') or {}).get('lyric') or '').strip()
