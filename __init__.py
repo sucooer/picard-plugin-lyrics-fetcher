@@ -347,7 +347,7 @@ def _pick_netease(songs, title, artist, duration):
 class _Lookup:
     """Carries the state of one lyrics lookup across its request chain."""
 
-    __slots__ = ('api', 'file', 'album', 'task_id', 'force', 'finished')
+    __slots__ = ('api', 'file', 'album', 'task_id', 'force', 'finished', 'retries')
 
     def __init__(self, api, file, album, task_id, force=False):
         self.api = api
@@ -356,6 +356,7 @@ class _Lookup:
         self.task_id = task_id
         self.force = force
         self.finished = False
+        self.retries = {}
 
     def finish(self):
         """Mark the album task done, exactly once."""
@@ -416,6 +417,30 @@ def _dispatch(ctx: _Lookup, sources, index):
     return _request_lrclib(ctx, sources, index)
 
 
+# Picard's web service only retries 429 / 503 / ServiceUnavailable on its own.
+# A protocol-level failure (an HTTP/2 stream error, a dropped connection) is
+# handed straight to our handler, and those are usually transient, so we retry
+# a couple of times before giving up on the source.
+MAX_REQUEST_RETRIES = 2
+
+
+def _retry_or_advance(ctx: _Lookup, sources, index, key, again):
+    """Retry a failed request, then fall through to the next source."""
+    used = ctx.retries.get(key, 0)
+    if used < MAX_REQUEST_RETRIES:
+        ctx.retries[key] = used + 1
+        ctx.api.logger.debug(
+            'Lyrics: %s failed for %s, retrying (attempt %d of %d)',
+            key, ctx.file.filename, used + 2, MAX_REQUEST_RETRIES + 1,
+        )
+        return again()
+    ctx.api.logger.warning(
+        'Lyrics: %s failed for %s after %d attempts, moving on',
+        key, ctx.file.filename, MAX_REQUEST_RETRIES + 1,
+    )
+    return _dispatch(ctx, sources, index + 1)
+
+
 def _begin_lookup(api: PluginApi, track, file, force=False, use_album_task=True) -> bool:
     """Start a lyrics lookup for one file.
 
@@ -446,17 +471,28 @@ def _begin_lookup(api: PluginApi, track, file, force=False, use_album_task=True)
 
     ctx = _Lookup(api, file, album, task_id, force=force)
     sources = _source_order(api)
-    first = partial(_dispatch, ctx, sources, 0)
+
+    # Picard calls request_factory() inside add_album_task(). Guard against the
+    # chain being started twice if anything after that raises, so a failure can
+    # never turn into duplicate network requests.
+    started = []
+
+    def fire_once():
+        if started:
+            return None
+        started.append(True)
+        return _dispatch(ctx, sources, 0)
 
     if task_id is not None:
         try:
-            api.add_album_task(album, task_id, 'Fetching lyrics', request_factory=first)
+            api.add_album_task(album, task_id, 'Fetching lyrics', request_factory=fire_once)
             return True
         except Exception as exc:  # pragma: no cover - defensive
             api.logger.debug(
                 'Lyrics: album task unavailable (%s), falling back to a direct request', exc
             )
-    first()
+    if not started:
+        fire_once()
     return True
 
 
@@ -537,8 +573,10 @@ def _request_netease(ctx: _Lookup, sources, index):
 
 def _on_netease_search(ctx: _Lookup, sources, index, document, reply, error):
     if error or not isinstance(document, dict):
-        ctx.api.logger.debug('Lyrics: NetEase search failed for %s (%s)', ctx.file.filename, error)
-        return _dispatch(ctx, sources, index + 1)
+        return _retry_or_advance(
+            ctx, sources, index, 'NetEase search',
+            partial(_request_netease, ctx, sources, index),
+        )
 
     result = document.get('result')
     songs = result.get('songs') if isinstance(result, dict) else None
@@ -557,11 +595,15 @@ def _on_netease_search(ctx: _Lookup, sources, index, document, reply, error):
         )
         return _dispatch(ctx, sources, index + 1)
 
+    return _request_netease_lyric(ctx, best, sources, index)
+
+
+def _request_netease_lyric(ctx: _Lookup, song, sources, index):
     return ctx.api.web_service.get_url(
         url=NETEASE_LYRIC_URL,
-        handler=partial(_on_netease_lyric, ctx, best, sources, index),
+        handler=partial(_on_netease_lyric, ctx, song, sources, index),
         parse_response_type='json',
-        unencoded_queryargs={'id': best.get('id'), 'lv': -1, 'kv': -1, 'tv': -1},
+        unencoded_queryargs={'id': song.get('id'), 'lv': -1, 'kv': -1, 'tv': -1},
         headers=dict(NETEASE_HEADERS),
         priority=True,
     )
@@ -569,9 +611,10 @@ def _on_netease_search(ctx: _Lookup, sources, index, document, reply, error):
 
 def _on_netease_lyric(ctx: _Lookup, song, sources, index, document, reply, error):
     if error or not isinstance(document, dict):
-        ctx.api.logger.debug('Lyrics: NetEase lyric fetch failed for %s (%s)',
-                             ctx.file.filename, error)
-        return _dispatch(ctx, sources, index + 1)
+        return _retry_or_advance(
+            ctx, sources, index, 'NetEase lyrics',
+            partial(_request_netease_lyric, ctx, song, sources, index),
+        )
 
     if document.get('nolyric') or document.get('uncollected'):
         ctx.api.logger.debug('Lyrics: NetEase has no lyrics for %s', ctx.file.filename)
@@ -619,8 +662,10 @@ def _request_lrclib(ctx: _Lookup, sources, index):
 
 def _on_lrclib_search(ctx: _Lookup, sources, index, document, reply, error):
     if error or not isinstance(document, list):
-        ctx.api.logger.debug('Lyrics: LRCLIB search failed for %s (%s)', ctx.file.filename, error)
-        return _dispatch(ctx, sources, index + 1)
+        return _retry_or_advance(
+            ctx, sources, index, 'LRCLIB search',
+            partial(_request_lrclib, ctx, sources, index),
+        )
     if not document:
         ctx.api.logger.debug('Lyrics: no LRCLIB entry for %s', ctx.file.filename)
         return _dispatch(ctx, sources, index + 1)
