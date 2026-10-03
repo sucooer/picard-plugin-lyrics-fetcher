@@ -437,26 +437,42 @@ def _write_lyrics(ctx: _Lookup, description: str, synced: str, plain: str) -> No
     else:
         api.logger.debug('Lyrics: nothing to write for %s', ctx.file.filename)
 
+    # Write the .lrc straight away. For formats that cannot store the
+    # syncedlyrics tag this is the only place the timestamps can live, and it
+    # means the user does not have to remember to save first.
+    if _setting(api, 'enabled'):
+        _export_lrc(api, ctx.file)
+
+    # Nothing calls File.update() after the addition-to-track processors run, so
+    # without this the track would never be shown as changed in Picard.
+    try:
+        ctx.file.update()
+    except Exception:  # pragma: no cover - defensive
+        pass
+
     if synced and not can_store_synced:
         extension = os.path.splitext(ctx.file.filename)[1].lstrip('.').upper() or 'this'
-        if not written:
-            api.logger.warning(
-                'Lyrics: %s — %s files cannot store the syncedlyrics tag, and plain lyrics '
-                'were not written either. Enable "Write plain lyrics" and/or "Also export a '
-                '.lrc file when saving" in the Lyrics Fetcher options.',
-                os.path.basename(ctx.file.filename), extension,
-            )
-        elif _setting(api, 'auto_lrc_for_unsupported'):
-            api.logger.info(
-                'Lyrics: %s — %s files cannot store the syncedlyrics tag (Picard drops it), '
-                'so a .lrc sidecar file will be written when you save.',
-                os.path.basename(ctx.file.filename), extension,
-            )
-        else:
+        name = os.path.basename(ctx.file.filename)
+        sidecar_enabled = (
+            _setting(api, 'auto_lrc_for_unsupported') or _setting(api, 'export_lrc')
+        )
+        if not sidecar_enabled:
             api.logger.info(
                 'Lyrics: %s — %s files cannot store the syncedlyrics tag (Picard drops it). '
                 'Enable "Also export a .lrc file when saving" to keep the timestamps.',
-                os.path.basename(ctx.file.filename), extension,
+                name, extension,
+            )
+        elif not written:
+            api.logger.info(
+                'Lyrics: %s — %s files cannot store the syncedlyrics tag; the timestamps are '
+                'in the .lrc sidecar. Enable "Write plain lyrics" to also fill the lyrics tag.',
+                name, extension,
+            )
+        else:
+            api.logger.info(
+                'Lyrics: %s — %s files cannot store the syncedlyrics tag (Picard drops it), '
+                'so the timestamps went into the .lrc sidecar file.',
+                name, extension,
             )
     ctx.finish()
 
@@ -758,11 +774,8 @@ def _on_lrclib_search(ctx: _Lookup, sources, index, document, reply, error):
 # .lrc export
 # ---------------------------------------------------------------------------
 
-def _on_file_saved(api: PluginApi, file) -> None:
-    """Called after a file is saved: optionally write a .lrc sidecar file."""
-    if not _setting(api, 'enabled'):
-        return
-
+def _export_lrc(api: PluginApi, file) -> None:
+    """Write the .lrc sidecar file, if the settings call for it."""
     metadata = file.metadata
     # Prefer the synced text we cached during the lookup: for formats that
     # cannot store the syncedlyrics tag this is the only copy left.
@@ -792,6 +805,15 @@ def _on_file_saved(api: PluginApi, file) -> None:
         api.logger.warning('Lyrics: could not write %s (%s)', path, exc)
     else:
         api.logger.info('Lyrics: wrote %s', path)
+
+
+def _on_file_saved(api: PluginApi, file) -> None:
+    """Called after a file is saved: refresh the .lrc sidecar."""
+    if not _setting(api, 'enabled'):
+        return
+    # The sidecar is normally already written when the lookup finished; this
+    # run picks up a file that got renamed by Picard during the save.
+    _export_lrc(api, file)
 
 
 # ---------------------------------------------------------------------------
