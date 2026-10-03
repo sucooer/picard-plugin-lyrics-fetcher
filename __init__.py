@@ -84,10 +84,54 @@ _LRC_META = re.compile(r'^\[[a-zA-Z]+:.*\]$')
 # Credit lines such as "作词 : GAK-amazuti-" or "混音工程师: You Yokoi" that
 # NetEase prepends to lyrics. Up to six characters may sit between the keyword
 # and the colon, which covers the common "...工程师" / "...制作人" suffixes.
+# The keyword list is shared with the MusicMetaCleaner project.
 _CREDIT = re.compile(
-    r'^(?:作词|作曲|编曲|词曲|制作人|出品人|出品|监制|混音|母带|录音|和声|合声|'
-    r'吉他|贝斯|鼓|键盘|弦乐|钢琴|策划|统筹|发行|OP|SP)'
-    r'[^:：]{0,6}[:：]',
+    r'^(?:'
+    # Simplified Chinese
+    r'作词|词|填词|歌词|作曲|曲|谱曲|词曲|编曲|配器|和声|和音|配唱|'
+    r'演唱|歌手|主唱|合唱|制作|制作人|监制|制片|'
+    r'录音|录音师|录音棚|录音室|混音|缩混|混音师|后期|母带|母带工程师|母带处理|'
+    r'文案|策划|统筹|推广|宣传|企划|发行|发行方|发行公司|'
+    r'出品|出品人|出品公司|唱片公司|版权|版权所有|版权归|授权|未经许可|禁止转载|'
+    r'鸣谢|特别鸣谢|提供|作品|词作者|曲作者|编者|翻译|译者|歌词翻译|音译|'
+    r'LRC|歌词制作|歌词编辑|OP|SP|'
+    # Traditional Chinese
+    r'作詞|詞|編曲|詩曲|'
+    # English
+    r'Produced by|Lyrics by|Composed by|Lyricist|Composer|Arranger|Arrangement|'
+    r'Written by|Music by|Words by|Artist|Singer|Vocal|Vocals|Performed by|'
+    r'Featuring|Producer|Executive Producer|Co-Producer|Production|'
+    r'Recording|Recorded by|Tracking|Engineered by|Audio Engineer|'
+    r'Mixed by|Mixing|Mix Engineer|Mastered by|Mastering|Remastered by|'
+    r'Chorus|Background Vocal|Backing Vocal|Harmony|'
+    r'Album|Title|Song|Track|Disc|Version|Original|Remix|'
+    r'Publisher|Publishing|Label|Distributed by|Distribution|'
+    r'Copyright|Licensed by|ISRC|'
+    r'Transcribed by|Translated by|Subtitle|Subtitles|Source|'
+    r'Orchestration by|Drum Programming|Drums by|Violin and Viola by|'
+    r'Vocals recorded by'
+    r')[^:：]{0,6}[:：]',
+    re.IGNORECASE,
+)
+
+# Credits that never carry a colon, so the rule above cannot see them:
+# "Produced by X", "Feat. Y", "© 2026 Sony", "未经许可，不得翻唱或使用".
+# Deliberately narrow, because there is no colon to anchor on:
+#   - bare "版权所有" / "版权归" are excluded: "版权归我们所有" is a valid lyric
+#   - "Featuring" is excluded: "Featuring you in my dream" is a valid lyric,
+#     while the "Feat." abbreviation is unambiguous
+#   - "未经许可" must be followed by a comma, as in the boilerplate wording
+#   - "Music by" / "Words by" are excluded: "Music by the sea" is a valid
+#     lyric, and both forms are still caught when a colon follows
+_CREDIT_BARE = re.compile(
+    r'^(?:'
+    r'(?:Produced|Written|Composed|Arranged|Performed|Recorded|Mixed|Mastered|'
+    r'Remastered|Transcribed|Translated|Engineered|Orchestrated|Distributed|'
+    r'Published|Licensed|Drums|Vocals|Violin and Viola)\s+by\b'
+    r'|Feat\.'
+    r'|©'
+    r'|未经许可[,，]|禁止转载|All Rights Reserved'
+    r')',
     re.IGNORECASE,
 )
 # NetEase covers are titled like "晴天（深情版）" or "Lemon (翻自 米津玄師)".
@@ -235,6 +279,10 @@ def _strip_credits(lrc: str) -> str:
     the *leading* block is removed, and only when every line in it looks like a
     credit, an LRC metadata tag or a bare timestamp, so a song whose first line
     happens to start with "作曲" is not damaged.
+
+    The keyword list lives in _CREDIT and _CREDIT_BARE. The colon requirement
+    in _CREDIT is what keeps ordinary lyric lines safe: "作曲家的名字" and
+    "OPを探して" have no colon and are therefore kept.
     """
     lines = lrc.splitlines()
     index = 0
@@ -246,7 +294,12 @@ def _strip_credits(lrc: str) -> str:
         text = _line_text(stripped)
         # A bare timestamp line ("[00:02.552]") belongs to the leading block
         # too - stopping on one of those used to leave the credits in place.
-        if _LRC_META.match(stripped) or not text or _CREDIT.match(text):
+        if (
+            _LRC_META.match(stripped)
+            or not text
+            or _CREDIT.match(text)
+            or _CREDIT_BARE.match(text)
+        ):
             index += 1
             continue
         break
