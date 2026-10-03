@@ -31,6 +31,29 @@ picard-cli plugins install /path/to/picard-plugin-lrclib-lyrics
 流程是全自动的：把音乐拖进 Picard → 插件按「标题 + 艺人 + 时长」查询
 → 结果写进元数据面板 → **点保存才会写进文件**。
 
+### 手动触发（右键菜单）
+
+自动抓取不灵、或者想单独给几首歌补歌词时，选中曲目或专辑 →
+**右键 → `Fetch lyrics (NetEase / LRCLIB)`**。
+
+手动触发会**忽略「已有歌词时不覆盖」**（你都主动点了），其余设置照常生效。
+它也会处理没匹配到 MusicBrainz 的曲目——只要文件本身有标题和艺人标签就行。
+
+### 排查：为什么没抓到歌词
+
+打开 **帮助 → 查看日志**，搜 `Lyrics`：
+
+| 日志内容 | 含义 |
+| --- | --- |
+| `Lyrics Fetcher: enabled` | 插件加载成功（没有这行 = 插件没装好或没启用） |
+| `automatic lookup hook is active` | 自动抓取的钩子被触发了（每次启动只打一次） |
+| `already has lyrics and "never replace" is enabled` | 文件已有歌词，被「不覆盖」挡住了 |
+| `has no title and/or artist tag` | 文件缺少标题或艺人标签，无法查询 |
+| `NetEase returned no results` / `no LRCLIB entry` | 两个来源都没收录 |
+| `— NetEase "..." by ...` | **成功**，后面是选中的记录（含时长和专辑名） |
+
+如果连 `automatic lookup hook is active` 都没有，说明钩子没被触发，直接用右键菜单。
+
 ## 两个来源的取舍
 
 | | 网易云音乐 | LRCLIB |

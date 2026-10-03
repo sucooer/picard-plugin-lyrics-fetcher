@@ -19,7 +19,7 @@ from functools import partial
 from PyQt6.QtWidgets import QCheckBox, QComboBox, QLabel, QLineEdit, QVBoxLayout
 
 from picard.config import BoolOption, TextOption
-from picard.plugin3.api import OptionsPage, PluginApi
+from picard.plugin3.api import BaseAction, OptionsPage, PluginApi
 
 # --- LRCLIB -----------------------------------------------------------------
 # We deliberately use the *search* endpoint rather than /api/get:
@@ -91,12 +91,27 @@ _NETEASE_NOISE = re.compile(r'(翻自|翻唱|cover|纯音乐|伴奏|remix|钢琴
 # ---------------------------------------------------------------------------
 
 def _register_settings(api: PluginApi) -> None:
-    """Declare the plugin's options so Picard knows their types and defaults."""
-    section = api.plugin_config.section_name
+    """Declare the plugin's options so Picard knows their types and defaults.
+
+    Never let a failure here abort ``enable()``: unregistered options simply
+    read back as None, and ``_setting()`` turns that into the default, so the
+    plugin keeps working.
+    """
+    try:
+        section = api.plugin_config.section_name
+    except Exception as exc:  # pragma: no cover - defensive
+        api.logger.warning('Lyrics: cannot determine the config section (%s); using defaults', exc)
+        return
     for name, default in BOOL_SETTINGS:
-        BoolOption.add_if_missing(section, name, default)
+        try:
+            BoolOption.add_if_missing(section, name, default)
+        except Exception as exc:  # pragma: no cover - defensive
+            api.logger.warning('Lyrics: could not register option %r (%s)', name, exc)
     for name, default in TEXT_SETTINGS:
-        TextOption.add_if_missing(section, name, default)
+        try:
+            TextOption.add_if_missing(section, name, default)
+        except Exception as exc:  # pragma: no cover - defensive
+            api.logger.warning('Lyrics: could not register option %r (%s)', name, exc)
 
 
 def _setting(api: PluginApi, name: str):
@@ -332,13 +347,14 @@ def _pick_netease(songs, title, artist, duration):
 class _Lookup:
     """Carries the state of one lyrics lookup across its request chain."""
 
-    __slots__ = ('api', 'file', 'album', 'task_id', 'finished')
+    __slots__ = ('api', 'file', 'album', 'task_id', 'force', 'finished')
 
-    def __init__(self, api, file, album, task_id):
+    def __init__(self, api, file, album, task_id, force=False):
         self.api = api
         self.file = file
         self.album = album
         self.task_id = task_id
+        self.force = force
         self.finished = False
 
     def finish(self):
@@ -363,7 +379,7 @@ def _write_lyrics(ctx: _Lookup, description: str, synced: str, plain: str) -> No
     if not plain and synced:
         plain = _lrc_to_plain(synced)
 
-    replace = not _setting(api, 'never_replace')
+    replace = ctx.force or not _setting(api, 'never_replace')
     written = []
     if _setting(api, 'write_synced') and synced and (
         replace or not metadata.get('syncedlyrics')
@@ -400,44 +416,104 @@ def _dispatch(ctx: _Lookup, sources, index):
     return _request_lrclib(ctx, sources, index)
 
 
-def _on_file_added(api: PluginApi, track, file) -> None:
-    """Called when a file is added to a track: look the lyrics up."""
-    if not _setting(api, 'enabled'):
-        return
-    if not (_setting(api, 'write_synced') or _setting(api, 'write_plain')):
-        return
+def _begin_lookup(api: PluginApi, track, file, force=False, use_album_task=True) -> bool:
+    """Start a lyrics lookup for one file.
 
+    Returns True when a lookup was started, False when it was skipped. ``force``
+    ignores the "never replace" setting (used by the manual menu action, where
+    the user has explicitly asked for lyrics).
+    """
     metadata = file.metadata
     if not metadata.get('title') or not metadata.get('artist'):
-        api.logger.debug(
-            'Lyrics: skipping %s, both title and artist are required', file.filename
+        api.logger.warning(
+            'Lyrics: %s has no title and/or artist tag, cannot look up lyrics', file.filename
         )
-        return
+        return False
 
-    if _setting(api, 'never_replace') and (
+    if not force and _setting(api, 'never_replace') and (
         metadata.get('syncedlyrics') or metadata.get('lyrics')
     ):
-        api.logger.debug('Lyrics: skipping %s, lyrics are already present', file.filename)
-        return
+        api.logger.info(
+            'Lyrics: %s already has lyrics and "never replace" is enabled, skipping',
+            file.filename,
+        )
+        return False
 
-    album = getattr(track, 'album', None)
+    album = getattr(track, 'album', None) if track is not None else None
     task_id = None
-    if album is not None:
+    if use_album_task and album is not None:
         task_id = 'lyrics_%d' % (abs(hash(file.filename)) & 0x7FFFFFFF)
 
-    ctx = _Lookup(api, file, album, task_id)
+    ctx = _Lookup(api, file, album, task_id, force=force)
     sources = _source_order(api)
     first = partial(_dispatch, ctx, sources, 0)
 
-    if album is not None and task_id is not None:
+    if task_id is not None:
         try:
             api.add_album_task(album, task_id, 'Fetching lyrics', request_factory=first)
-            return
+            return True
         except Exception as exc:  # pragma: no cover - defensive
             api.logger.debug(
                 'Lyrics: album task unavailable (%s), falling back to a direct request', exc
             )
     first()
+    return True
+
+
+def _track_files(obj):
+    """Yield ``(track, file)`` pairs for a Track, Album or Cluster object."""
+    tracks = getattr(obj, 'tracks', None)
+    if tracks:
+        for track in tracks:
+            for file in list(getattr(track, 'files', None) or []):
+                yield track, file
+        return
+    for file in list(getattr(obj, 'files', None) or []):
+        yield obj, file
+
+
+_auto_hook_reported = False
+
+
+def _on_file_added(api: PluginApi, track, file) -> None:
+    """Called when a file is added to a track: look the lyrics up."""
+    global _auto_hook_reported
+    if not _setting(api, 'enabled'):
+        return
+    if not (_setting(api, 'write_synced') or _setting(api, 'write_plain')):
+        return
+
+    if not _auto_hook_reported:
+        # One line per session proving the automatic hook is wired up. If this
+        # never shows up in the log after loading files, the plugin did not
+        # register (or was not enabled) and the manual menu action is the way
+        # to go.
+        _auto_hook_reported = True
+        api.logger.info('Lyrics: automatic lookup hook is active')
+
+    _begin_lookup(api, track, file)
+
+
+class FetchLyricsAction(BaseAction):
+    """Right-click action: fetch lyrics for the selected tracks/albums."""
+
+    TITLE = 'Fetch lyrics (NetEase / LRCLIB)'
+
+    def callback(self, objs):
+        api = self.api
+        started = 0
+        seen = set()
+        for obj in objs:
+            for track, file in _track_files(obj):
+                if file.filename in seen:
+                    continue
+                seen.add(file.filename)
+                if _begin_lookup(api, track, file, force=True, use_album_task=False):
+                    started += 1
+        api.logger.info(
+            'Lyrics: manual lookup started for %d file(s) out of %d selected item(s)',
+            started, len(objs),
+        )
 
 
 # --- NetEase ---------------------------------------------------------------
@@ -726,6 +802,8 @@ def enable(api: PluginApi) -> None:
     _register_settings(api)
     api.register_file_post_addition_to_track_processor(_on_file_added)
     api.register_file_post_save_processor(_on_file_saved)
+    api.register_track_action(FetchLyricsAction)
+    api.register_album_action(FetchLyricsAction)
     api.register_options_page(LrclibLyricsOptionsPage)
     api.logger.info('Lyrics Fetcher: enabled')
 
