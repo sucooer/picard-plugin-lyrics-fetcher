@@ -58,6 +58,7 @@ BOOL_SETTINGS = (
     ('write_synced', True),
     ('write_plain', True),
     ('timed_lyrics_in_tag', True),
+    ('strip_empty_lrc_lines', True),
     ('never_replace', True),
     ('export_lrc', False),
     ('auto_lrc_for_unsupported', True),
@@ -212,14 +213,29 @@ def _lrc_to_plain(lrc: str) -> str:
     return '\n'.join(line for line in lines if line)
 
 
+def _drop_empty_lines(lrc: str) -> str:
+    """Remove LRC lines that carry a timestamp but no lyric text.
+
+    NetEase emits these to blank the display during instrumental passages. They
+    look like debris in the file, so they are dropped by default; the setting
+    ``strip_empty_lrc_lines`` turns that off for players that rely on them.
+    """
+    kept = []
+    for line in lrc.splitlines():
+        if _LRC_TIME.match(line.strip()) and not _line_text(line):
+            continue
+        kept.append(line)
+    return '\n'.join(kept)
+
+
 def _strip_credits(lrc: str) -> str:
     """Drop the credit block NetEase prepends to the lyrics.
 
     NetEase lyrics normally open with lines such as
     ``[00:00.000] 作词 : GAK-amazuti-`` before the first real lyric line. Only
     the *leading* block is removed, and only when every line in it looks like a
-    credit or an LRC metadata tag, so a song whose first line happens to start
-    with "作曲" is not damaged.
+    credit, an LRC metadata tag or a bare timestamp, so a song whose first line
+    happens to start with "作曲" is not damaged.
     """
     lines = lrc.splitlines()
     index = 0
@@ -229,7 +245,9 @@ def _strip_credits(lrc: str) -> str:
             index += 1
             continue
         text = _line_text(stripped)
-        if _LRC_META.match(stripped) or _CREDIT.match(text):
+        # A bare timestamp line ("[00:02.552]") belongs to the leading block
+        # too - stopping on one of those used to leave the credits in place.
+        if _LRC_META.match(stripped) or not text or _CREDIT.match(text):
             index += 1
             continue
         break
@@ -426,6 +444,8 @@ def _write_lyrics(ctx: _Lookup, description: str, synced: str, plain: str) -> No
 
     synced = (synced or '').strip()
     plain = (plain or '').strip()
+    if synced and _setting(api, 'strip_empty_lrc_lines'):
+        synced = _drop_empty_lines(synced)
     if not plain and synced:
         plain = _lrc_to_plain(synced)
 
@@ -958,6 +978,10 @@ class LrclibLyricsOptionsPage(OptionsPage):
             'For formats with no synced-lyrics field (FLAC, OGG, M4A), put the timed lyrics '
             'into the "lyrics" tag',
         ))
+        self.cb_strip_empty = QCheckBox(self._tr(
+            'option.strip_empty_lrc_lines',
+            'Drop timestamp-only lines that carry no lyric text',
+        ))
         self.cb_never_replace = QCheckBox(
             self._tr('option.never_replace', 'Never replace lyrics that are already present')
         )
@@ -1005,6 +1029,7 @@ class LrclibLyricsOptionsPage(OptionsPage):
         layout.addWidget(self.cb_write_synced)
         layout.addWidget(self.cb_write_plain)
         layout.addWidget(self.cb_timed_in_tag)
+        layout.addWidget(self.cb_strip_empty)
         layout.addWidget(self.cb_never_replace)
         layout.addWidget(self.cb_strip_credits)
         layout.addWidget(self.cb_add_translation)
@@ -1031,6 +1056,7 @@ class LrclibLyricsOptionsPage(OptionsPage):
         self.cb_write_synced.setChecked(bool(_setting(api, 'write_synced')))
         self.cb_write_plain.setChecked(bool(_setting(api, 'write_plain')))
         self.cb_timed_in_tag.setChecked(bool(_setting(api, 'timed_lyrics_in_tag')))
+        self.cb_strip_empty.setChecked(bool(_setting(api, 'strip_empty_lrc_lines')))
         self.cb_never_replace.setChecked(bool(_setting(api, 'never_replace')))
         self.cb_strip_credits.setChecked(bool(_setting(api, 'netease_strip_credits')))
         self.cb_add_translation.setChecked(bool(_setting(api, 'netease_add_translation')))
@@ -1048,6 +1074,7 @@ class LrclibLyricsOptionsPage(OptionsPage):
         config['write_synced'] = self.cb_write_synced.isChecked()
         config['write_plain'] = self.cb_write_plain.isChecked()
         config['timed_lyrics_in_tag'] = self.cb_timed_in_tag.isChecked()
+        config['strip_empty_lrc_lines'] = self.cb_strip_empty.isChecked()
         config['never_replace'] = self.cb_never_replace.isChecked()
         config['netease_strip_credits'] = self.cb_strip_credits.isChecked()
         config['netease_add_translation'] = self.cb_add_translation.isChecked()

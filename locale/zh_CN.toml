@@ -6,6 +6,7 @@
 "option.write_synced" = "写入带时间轴的歌词到 \"syncedlyrics\" 标签（仅 MP3 支持）"
 "option.write_plain" = "写入歌词到 \"lyrics\" 标签"
 "option.timed_lyrics_in_tag" = "存不了同步歌词的格式（FLAC、OGG、M4A）：把带时间轴的歌词写进 \"lyrics\" 标签"
+"option.strip_empty_lrc_lines" = "去掉只有时间轴、没有歌词的空行"
 "option.never_replace" = "已有歌词时不覆盖"
 "option.strip_credits" = "网易云：去掉开头的制作人员信息（作词/作曲/编曲 …）"
 "option.add_translation" = "网易云：在每行后追加中文翻译（双语歌词）"
@@ -13,4 +14,4 @@
 "option.auto_lrc" = "为存不了带时间轴歌词的格式（FLAC、OGG、M4A）自动导出 .lrc 文件"
 "option.lrc_never_replace" = "已存在 .lrc 文件时不覆盖"
 "option.lrc_filename" = ".lrc 文件的命名规则："
-"option.note" = "只有 MP3（ID3）有真正的同步歌词字段。FLAC、OGG/Opus、MP4/M4A 会被 Picard 静默丢弃 \"syncedlyrics\" 标签，所以这些格式插件会把带时间轴的歌词写进 \"lyrics\" 标签，并额外导出一个 .lrc 文件。两个来源都不使用 MusicBrainz ID 匹配，可能匹配错误，保存前请扫一眼。网易云用的是非公开网页接口，可能随时失效。"
+"option.note" = "只有 MP3（ID3）有真正的同步歌词字段。FLAC、OGG/Opus、MP4/M4A 会被 Picard 静默丢弃 \"syncedlyrics\" 标签，所以这些格式插件会把带时间轴的歌词写进 \"lyrics\" 标签，并额外导出一个 .lrc 文件。两个来源都不使用 MusicBrainz ID 匹配，可能匹配错误，保存前请扫一眼。网易云走 HTTP/1.1 抓取，因为它的 CDN 会掐断 Qt 的 HTTP/2 连接。"
