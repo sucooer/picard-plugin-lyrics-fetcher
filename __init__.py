@@ -691,8 +691,8 @@ def _dispatch(ctx: _Lookup, sources, index):
 MAX_REQUEST_RETRIES = 2
 
 
-def _retry_or_advance(ctx: _Lookup, sources, index, key, again):
-    """Retry a failed request, then fall through to the next source."""
+def _retry_or_advance(ctx: _Lookup, sources, index, key, again, advance=None):
+    """Retry a failed request, then run ``advance`` (the next source by default)."""
     used = ctx.retries.get(key, 0)
     if used < MAX_REQUEST_RETRIES:
         ctx.retries[key] = used + 1
@@ -705,6 +705,8 @@ def _retry_or_advance(ctx: _Lookup, sources, index, key, again):
         'Lyrics: %s failed for %s after %d attempts, moving on',
         key, ctx.file.filename, MAX_REQUEST_RETRIES + 1,
     )
+    if advance is not None:
+        return advance()
     return _dispatch(ctx, sources, index + 1)
 
 
@@ -874,9 +876,25 @@ def _on_netease_lyric(ctx: _Lookup, candidates, sources, index, document, reply,
     song = candidates[0]
     document = _as_json(document)
     if error or not isinstance(document, dict):
+        # A transport failure on one entry says nothing about the other
+        # releases of the same track, so exhaust this entry's retry budget
+        # (keyed per candidate, so earlier entries cannot eat later ones)
+        # and then fall through to the next candidate like the empty-lyrics
+        # case below - only the last candidate moves on to the next source.
+        def try_next_candidate():
+            remaining = candidates[1:]
+            if not remaining:
+                return _dispatch(ctx, sources, index + 1)
+            ctx.api.logger.info(
+                'Lyrics: NetEase entry %s for %s failed, trying the next match',
+                song.get('id'), ctx.file.filename,
+            )
+            return _request_netease_lyric(ctx, remaining, sources, index)
+
         return _retry_or_advance(
-            ctx, sources, index, 'NetEase lyrics',
+            ctx, sources, index, 'NetEase lyrics %s' % (song.get('id'),),
             partial(_request_netease_lyric, ctx, candidates, sources, index),
+            advance=try_next_candidate,
         )
 
     lrc = '' if document.get('nolyric') or document.get('uncollected') else (

@@ -5,7 +5,22 @@ __pycache__/
 # Environments and development tools
 .venv/
 .ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# Editors
+.vscode/
+.idea/
 
 # Distribution / packaging
 *.egg-info/
 dist/
+build/
+*.zip
+
+# OS-generated files
+Thumbs.db
+.DS_Store
+
+# Local scratch output
+*.log
