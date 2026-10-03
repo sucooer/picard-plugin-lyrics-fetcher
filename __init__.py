@@ -55,6 +55,7 @@ BOOL_SETTINGS = (
     ('enabled', True),
     ('write_synced', True),
     ('write_plain', True),
+    ('timed_lyrics_in_tag', True),
     ('never_replace', True),
     ('export_lrc', False),
     ('auto_lrc_for_unsupported', True),
@@ -412,6 +413,16 @@ def _write_lyrics(ctx: _Lookup, description: str, synced: str, plain: str) -> No
     can_store_synced = _supports_synced(ctx.file)
     replace = ctx.force or not _setting(api, 'never_replace')
 
+    # Formats such as FLAC, OGG and M4A have no field for synced lyrics at all.
+    # When asked, put the LRC text into the plain lyrics tag instead, so the
+    # timestamps are still stored inside the file and not only in the sidecar.
+    timed_in_tag = (
+        not can_store_synced
+        and bool(synced)
+        and _setting(api, 'timed_lyrics_in_tag')
+    )
+    tag_lyrics = synced if timed_in_tag else plain
+
     # Keep the synced text for the .lrc export even when the format cannot
     # store it in a tag.
     if synced:
@@ -421,14 +432,16 @@ def _write_lyrics(ctx: _Lookup, description: str, synced: str, plain: str) -> No
             pass
 
     written = []
+    tag_written = False
     if _setting(api, 'write_synced') and synced and can_store_synced:
         if replace or not metadata.get('syncedlyrics'):
             metadata['syncedlyrics'] = synced
             written.append('syncedlyrics')
-    if _setting(api, 'write_plain') and plain:
+    if _setting(api, 'write_plain') and tag_lyrics:
         if replace or not metadata.get('lyrics'):
-            metadata['lyrics'] = plain
-            written.append('lyrics')
+            metadata['lyrics'] = tag_lyrics
+            tag_written = True
+            written.append('lyrics (with timestamps)' if timed_in_tag else 'lyrics')
 
     if written:
         api.logger.info(
@@ -456,7 +469,14 @@ def _write_lyrics(ctx: _Lookup, description: str, synced: str, plain: str) -> No
         sidecar_enabled = (
             _setting(api, 'auto_lrc_for_unsupported') or _setting(api, 'export_lrc')
         )
-        if not sidecar_enabled:
+        if timed_in_tag and tag_written:
+            api.logger.info(
+                'Lyrics: %s — %s has no field for synced lyrics, so the timed lyrics went '
+                'into the "lyrics" tag%s.',
+                name, extension,
+                ' (and the .lrc sidecar)' if sidecar_enabled else '',
+            )
+        elif not sidecar_enabled:
             api.logger.info(
                 'Lyrics: %s — %s files cannot store the syncedlyrics tag (Picard drops it). '
                 'Enable "Also export a .lrc file when saving" to keep the timestamps.',
@@ -845,6 +865,11 @@ class LrclibLyricsOptionsPage(OptionsPage):
         self.cb_write_plain = QCheckBox(
             self._tr('option.write_plain', 'Write plain lyrics to "lyrics"')
         )
+        self.cb_timed_in_tag = QCheckBox(self._tr(
+            'option.timed_lyrics_in_tag',
+            'For formats with no synced-lyrics field (FLAC, OGG, M4A), put the timed lyrics '
+            'into the "lyrics" tag',
+        ))
         self.cb_never_replace = QCheckBox(
             self._tr('option.never_replace', 'Never replace lyrics that are already present')
         )
@@ -876,11 +901,12 @@ class LrclibLyricsOptionsPage(OptionsPage):
 
         note = QLabel(self._tr(
             'option.note',
-            'Only MP3 (ID3) can store the "syncedlyrics" tag — FLAC, OGG/Opus and MP4/M4A '
-            'silently drop it. For those the plugin writes plain lyrics and, by default, a '
-            '.lrc sidecar file holding the timestamps. Neither source matches on MusicBrainz '
-            'IDs, so mismatches are possible — skim the lyrics before saving. NetEase uses '
-            'undocumented web endpoints and may stop working without notice.',
+            'Only MP3 (ID3) has a real field for synced lyrics. FLAC, OGG/Opus and MP4/M4A '
+            'silently drop the "syncedlyrics" tag, so for those the plugin puts the timed '
+            'lyrics into the "lyrics" tag and writes a .lrc sidecar file. Neither source '
+            'matches on MusicBrainz IDs, so mismatches are possible — skim the lyrics before '
+            'saving. NetEase uses undocumented web endpoints and may stop working without '
+            'notice.',
         ))
         note.setWordWrap(True)
 
@@ -890,6 +916,7 @@ class LrclibLyricsOptionsPage(OptionsPage):
         layout.addWidget(self.cmb_source)
         layout.addWidget(self.cb_write_synced)
         layout.addWidget(self.cb_write_plain)
+        layout.addWidget(self.cb_timed_in_tag)
         layout.addWidget(self.cb_never_replace)
         layout.addWidget(self.cb_strip_credits)
         layout.addWidget(self.cb_add_translation)
@@ -915,6 +942,7 @@ class LrclibLyricsOptionsPage(OptionsPage):
         self.cb_enabled.setChecked(bool(_setting(api, 'enabled')))
         self.cb_write_synced.setChecked(bool(_setting(api, 'write_synced')))
         self.cb_write_plain.setChecked(bool(_setting(api, 'write_plain')))
+        self.cb_timed_in_tag.setChecked(bool(_setting(api, 'timed_lyrics_in_tag')))
         self.cb_never_replace.setChecked(bool(_setting(api, 'never_replace')))
         self.cb_strip_credits.setChecked(bool(_setting(api, 'netease_strip_credits')))
         self.cb_add_translation.setChecked(bool(_setting(api, 'netease_add_translation')))
@@ -931,6 +959,7 @@ class LrclibLyricsOptionsPage(OptionsPage):
         config['enabled'] = self.cb_enabled.isChecked()
         config['write_synced'] = self.cb_write_synced.isChecked()
         config['write_plain'] = self.cb_write_plain.isChecked()
+        config['timed_lyrics_in_tag'] = self.cb_timed_in_tag.isChecked()
         config['never_replace'] = self.cb_never_replace.isChecked()
         config['netease_strip_credits'] = self.cb_strip_credits.isChecked()
         config['netease_add_translation'] = self.cb_add_translation.isChecked()
