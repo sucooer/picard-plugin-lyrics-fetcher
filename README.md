@@ -86,6 +86,13 @@ picard-cli plugins install /path/to/picard-plugin-lrclib-lyrics
 网络错误写进日志。搜索接口始终返回 200（没找到就是空列表），并且结果里直接带
 歌词正文，不用二次请求。
 
+关于重试：Picard 的 web service 只会自动重试 429 / 503 / ServiceUnavailable，
+**协议层错误（HTTP/2 stream error、连接中断）会直接丢给插件**。这类错误通常是
+偶发的，所以插件会自己重试 **2 次**再放弃；某个来源失败后自动换下一个来源。
+日志里能看到 `retrying (attempt 2 of 3)`。
+
+「搜索返回空」不算错误，不会触发重试——那说明对方确实没收录。
+
 ## 注意事项
 
 - **收录率不是 100%**。冷门曲目、专辑独占曲经常两个来源都查不到。
