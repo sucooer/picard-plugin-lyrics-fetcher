@@ -20,10 +20,17 @@ from PyQt6.QtWidgets import QCheckBox, QLabel, QLineEdit, QVBoxLayout
 from picard.config import BoolOption, TextOption
 from picard.plugin3.api import OptionsPage, PluginApi
 
-LRCLIB_URL = 'https://lrclib.net/api/get'
+# We deliberately use the *search* endpoint rather than /api/get:
+# /api/get is an exact-match lookup that answers 404 when it cannot find a
+# record, which Picard logs as a network error. /api/search always answers
+# 200 (possibly with an empty list), returns the full lyric text inline, and
+# tolerates the small artist/album spelling differences that are common with
+# non-Latin scripts. The trade-off is that we must pick the right record
+# ourselves, which is what _pick_best() does.
+LRCLIB_SEARCH_URL = 'https://lrclib.net/api/search'
 DEFAULT_LRC_PATTERN = '%filename%.lrc'
 
-# (setting name, default value) — keep in sync with DEFAULTS below
+# (setting name, default value)
 BOOL_SETTINGS = (
     ('enabled', True),
     ('write_synced', True),
@@ -69,12 +76,18 @@ def _setting(api: PluginApi, name: str):
 # helpers
 # ---------------------------------------------------------------------------
 
+def _normalize(text) -> str:
+    """Casefold and collapse whitespace so that names compare reliably."""
+    return ' '.join(str(text or '').casefold().split())
+
+
 def _duration_seconds(metadata) -> int | None:
     """Return the track length in seconds, or None if unavailable.
 
     Picard stores the length as a ``mm:ss`` string in the ``~length``
-    variable. LRCLIB uses the duration to disambiguate matches, so it is worth
-    sending when we have it.
+    variable. LRCLIB often holds several versions of the same song (album
+    version, single edit, live take), so the duration is what lets us pick the
+    right one.
     """
     raw = metadata.get('~length')
     if not raw:
@@ -86,6 +99,51 @@ def _duration_seconds(metadata) -> int | None:
         return int(round(seconds))
     except (TypeError, ValueError):
         return None
+
+
+def _pick_best(results, title, artist, duration):
+    """Choose the best matching record from a LRCLIB search result list.
+
+    A record is only accepted when the track title matches exactly (after
+    normalisation) and the artist name matches exactly or is contained in the
+    other. Among the survivors we prefer the one whose duration is closest to
+    the file's, and then the one that carries synced lyrics.
+
+    Returns the chosen record, or None when nothing is a confident match.
+    """
+    want_title = _normalize(title)
+    want_artist = _normalize(artist)
+
+    candidates = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        got_title = _normalize(item.get('trackName'))
+        got_artist = _normalize(item.get('artistName'))
+
+        if got_title != want_title:
+            continue
+        if got_artist != want_artist and want_artist not in got_artist and got_artist not in want_artist:
+            continue
+        if not (item.get('syncedLyrics') or item.get('plainLyrics')):
+            continue
+        candidates.append(item)
+
+    if not candidates:
+        return None
+
+    def rank(item):
+        if duration:
+            try:
+                delta = abs(float(item.get('duration') or 0) - duration)
+            except (TypeError, ValueError):
+                delta = float('inf')
+        else:
+            delta = 0.0
+        return (delta, 0 if item.get('syncedLyrics') else 1)
+
+    candidates.sort(key=rank)
+    return candidates[0]
 
 
 def _lrc_path(api: PluginApi, file) -> str:
@@ -129,19 +187,13 @@ def _on_file_added(api: PluginApi, track, file) -> None:
         'track_name': title,
         'artist_name': artist,
     }
-    album_name = metadata.get('album')
-    if album_name:
-        queryargs['album_name'] = album_name
-    duration = _duration_seconds(metadata)
-    if duration:
-        queryargs['duration'] = duration
 
     album = getattr(track, 'album', None)
     if album is not None:
         task_id = 'lyrics_%d' % (abs(hash(file.filename)) & 0x7FFFFFFF)
         factory = partial(
             api.web_service.get_url,
-            url=LRCLIB_URL,
+            url=LRCLIB_SEARCH_URL,
             handler=partial(_on_response, api, file, album, task_id),
             parse_response_type='json',
             unencoded_queryargs=queryargs,
@@ -156,7 +208,7 @@ def _on_file_added(api: PluginApi, track, file) -> None:
             )
 
     api.web_service.get_url(
-        url=LRCLIB_URL,
+        url=LRCLIB_SEARCH_URL,
         handler=partial(_on_response, api, file, None, None),
         parse_response_type='json',
         unencoded_queryargs=queryargs,
@@ -165,23 +217,39 @@ def _on_file_added(api: PluginApi, track, file) -> None:
 
 
 def _on_response(api: PluginApi, file, album, task_id, document, reply, error) -> None:
-    """Handle the LRCLIB response and write the tags."""
+    """Pick the best search hit and write the tags."""
     try:
         if error:
             api.logger.debug('LRCLIB Lyrics: request failed for %s (%s)', file.filename, error)
             return
-        if not isinstance(document, dict):
-            api.logger.debug('LRCLIB Lyrics: no lyrics found for %s', file.filename)
+        if not isinstance(document, list):
+            api.logger.debug('LRCLIB Lyrics: unexpected response for %s', file.filename)
             return
-        if document.get('instrumental'):
-            api.logger.info('LRCLIB Lyrics: %s is marked as instrumental', file.filename)
+        if not document:
+            api.logger.debug('LRCLIB Lyrics: no LRCLIB entry for %s', file.filename)
             return
 
         metadata = file.metadata
-        replace = not _setting(api, 'never_replace')
+        best = _pick_best(
+            document,
+            metadata.get('title'),
+            metadata.get('artist'),
+            _duration_seconds(metadata),
+        )
+        if best is None:
+            api.logger.debug(
+                'LRCLIB Lyrics: %s results for %s but none matched title/artist',
+                len(document), file.filename,
+            )
+            return
 
-        synced = (document.get('syncedLyrics') or '').strip()
-        plain = (document.get('plainLyrics') or '').strip()
+        if best.get('instrumental'):
+            api.logger.info('LRCLIB Lyrics: %s is marked as instrumental', file.filename)
+            return
+
+        replace = not _setting(api, 'never_replace')
+        synced = (best.get('syncedLyrics') or '').strip()
+        plain = (best.get('plainLyrics') or '').strip()
 
         written = []
         if _setting(api, 'write_synced') and synced and (
@@ -196,7 +264,15 @@ def _on_response(api: PluginApi, file, album, task_id, document, reply, error) -
             written.append('lyrics')
 
         if written:
-            api.logger.info('LRCLIB Lyrics: %s — wrote %s', file.filename, ', '.join(written))
+            api.logger.info(
+                'LRCLIB Lyrics: %s — matched "%s" by %s (%ss, album %s), wrote %s',
+                file.filename,
+                best.get('trackName'),
+                best.get('artistName'),
+                best.get('duration'),
+                best.get('albumName'),
+                ', '.join(written),
+            )
         else:
             api.logger.debug('LRCLIB Lyrics: nothing to write for %s', file.filename)
     finally:
@@ -272,7 +348,9 @@ class LrclibLyricsOptionsPage(OptionsPage):
         note = QLabel(self._tr(
             'option.note',
             'Note: the "syncedlyrics" tag is only supported for MP3 and FLAC/OGG. '
-            'MP4/M4A files cannot store synced lyrics — enable plain lyrics for those.',
+            'MP4/M4A files cannot store synced lyrics — enable plain lyrics for those. '
+            'LRCLIB matches on artist, title and duration, not on MusicBrainz IDs, '
+            'so mismatches are possible — skim the lyrics before saving.',
         ))
         note.setWordWrap(True)
 
