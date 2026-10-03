@@ -12,6 +12,7 @@ Vorbis/FLAC/OGG/Opus). MP4/M4A cannot store synced lyrics.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from functools import partial
@@ -150,6 +151,23 @@ def _source_order(api: PluginApi):
 def _normalize(text) -> str:
     """Casefold and collapse whitespace so that names compare reliably."""
     return ' '.join(str(text or '').casefold().split())
+
+
+def _as_json(document):
+    """Return a decoded JSON document, or None when it cannot be decoded.
+
+    NetEase is requested without a response parser, because Picard sets an
+    ``Accept: application/json`` header for parsed responses and music.163.com
+    answers those with ``Content-Type: text/plain`` — the header appears to
+    upset its CDN. Without a parser the handler receives the raw body, so we
+    decode it here.
+    """
+    if isinstance(document, (bytes, bytearray)):
+        try:
+            return json.loads(document.decode('utf-8', 'replace'))
+        except ValueError:
+            return None
+    return document
 
 
 def _artist_matches(want: str, got: str) -> bool:
@@ -448,7 +466,7 @@ def _write_lyrics(ctx: _Lookup, description: str, synced: str, plain: str) -> No
             'Lyrics: %s — %s, wrote %s', ctx.file.filename, description, ', '.join(written)
         )
     else:
-        api.logger.debug('Lyrics: nothing to write for %s', ctx.file.filename)
+        api.logger.info('Lyrics: nothing to write for %s', ctx.file.filename)
 
     # Write the .lrc straight away. For formats that cannot store the
     # syncedlyrics tag this is the only place the timestamps can live, and it
@@ -504,7 +522,7 @@ def _write_lyrics(ctx: _Lookup, description: str, synced: str, plain: str) -> No
 def _dispatch(ctx: _Lookup, sources, index):
     """Fire the request for sources[index], or give up when none is left."""
     if index >= len(sources):
-        ctx.api.logger.debug('Lyrics: no match for %s in any source', ctx.file.filename)
+        ctx.api.logger.info('Lyrics: no match for %s in any source', ctx.file.filename)
         ctx.finish()
         return None
     if sources[index] == SOURCE_NETEASE:
@@ -524,7 +542,7 @@ def _retry_or_advance(ctx: _Lookup, sources, index, key, again):
     used = ctx.retries.get(key, 0)
     if used < MAX_REQUEST_RETRIES:
         ctx.retries[key] = used + 1
-        ctx.api.logger.debug(
+        ctx.api.logger.info(
             'Lyrics: %s failed for %s, retrying (attempt %d of %d)',
             key, ctx.file.filename, used + 2, MAX_REQUEST_RETRIES + 1,
         )
@@ -654,7 +672,8 @@ def _request_netease(ctx: _Lookup, sources, index):
     return ctx.api.web_service.get_url(
         url=NETEASE_SEARCH_URL,
         handler=partial(_on_netease_search, ctx, sources, index),
-        parse_response_type='json',
+        # Deliberately no parser: see _as_json().
+        parse_response_type=None,
         unencoded_queryargs={
             's': '%s %s' % (metadata.get('title'), metadata.get('artist')),
             'type': 1,
@@ -667,6 +686,7 @@ def _request_netease(ctx: _Lookup, sources, index):
 
 
 def _on_netease_search(ctx: _Lookup, sources, index, document, reply, error):
+    document = _as_json(document)
     if error or not isinstance(document, dict):
         return _retry_or_advance(
             ctx, sources, index, 'NetEase search',
@@ -676,7 +696,7 @@ def _on_netease_search(ctx: _Lookup, sources, index, document, reply, error):
     result = document.get('result')
     songs = result.get('songs') if isinstance(result, dict) else None
     if not songs:
-        ctx.api.logger.debug('Lyrics: NetEase returned no results for %s', ctx.file.filename)
+        ctx.api.logger.info('Lyrics: NetEase returned no results for %s', ctx.file.filename)
         return _dispatch(ctx, sources, index + 1)
 
     metadata = ctx.file.metadata
@@ -684,7 +704,7 @@ def _on_netease_search(ctx: _Lookup, sources, index, document, reply, error):
         songs, metadata.get('title'), metadata.get('artist'), _duration_seconds(metadata)
     )
     if best is None:
-        ctx.api.logger.debug(
+        ctx.api.logger.info(
             'Lyrics: NetEase returned %d results for %s but none matched title/artist',
             len(songs), ctx.file.filename,
         )
@@ -697,7 +717,8 @@ def _request_netease_lyric(ctx: _Lookup, song, sources, index):
     return ctx.api.web_service.get_url(
         url=NETEASE_LYRIC_URL,
         handler=partial(_on_netease_lyric, ctx, song, sources, index),
-        parse_response_type='json',
+        # Deliberately no parser: see _as_json().
+        parse_response_type=None,
         unencoded_queryargs={'id': song.get('id'), 'lv': -1, 'kv': -1, 'tv': -1},
         headers=dict(NETEASE_HEADERS),
         priority=True,
@@ -705,6 +726,7 @@ def _request_netease_lyric(ctx: _Lookup, song, sources, index):
 
 
 def _on_netease_lyric(ctx: _Lookup, song, sources, index, document, reply, error):
+    document = _as_json(document)
     if error or not isinstance(document, dict):
         return _retry_or_advance(
             ctx, sources, index, 'NetEase lyrics',
@@ -712,7 +734,7 @@ def _on_netease_lyric(ctx: _Lookup, song, sources, index, document, reply, error
         )
 
     if document.get('nolyric') or document.get('uncollected'):
-        ctx.api.logger.debug('Lyrics: NetEase has no lyrics for %s', ctx.file.filename)
+        ctx.api.logger.info('Lyrics: NetEase has no lyrics for %s', ctx.file.filename)
         return _dispatch(ctx, sources, index + 1)
 
     lrc = ((document.get('lrc') or {}).get('lyric') or '').strip()
@@ -762,7 +784,7 @@ def _on_lrclib_search(ctx: _Lookup, sources, index, document, reply, error):
             partial(_request_lrclib, ctx, sources, index),
         )
     if not document:
-        ctx.api.logger.debug('Lyrics: no LRCLIB entry for %s', ctx.file.filename)
+        ctx.api.logger.info('Lyrics: no LRCLIB entry for %s', ctx.file.filename)
         return _dispatch(ctx, sources, index + 1)
 
     metadata = ctx.file.metadata
@@ -770,7 +792,7 @@ def _on_lrclib_search(ctx: _Lookup, sources, index, document, reply, error):
         document, metadata.get('title'), metadata.get('artist'), _duration_seconds(metadata)
     )
     if best is None:
-        ctx.api.logger.debug(
+        ctx.api.logger.info(
             'Lyrics: LRCLIB returned %d results for %s but none matched title/artist',
             len(document), ctx.file.filename,
         )
