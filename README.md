@@ -105,13 +105,28 @@ picard-cli plugins install /path/to/picard-plugin-lrclib-lyrics
 想看具体发生了什么，打开 **帮助 → 查看日志**，搜 `Lyrics:`：成功会记录选中了
 哪条记录（含时长和专辑名），失败会记录原因。
 
-## 格式支持
+## 格式支持（重要）
 
-| 格式 | `syncedlyrics`（带时间轴） | `lyrics`（纯文本） |
-| --- | --- | --- |
-| MP3 (ID3) | 支持 | 支持 |
-| FLAC / OGG / Opus (Vorbis) | 支持 | 支持 |
-| MP4 / M4A | **不支持** | 支持 |
+**只有 MP3 能存带时间轴的歌词。** 这是 Picard 的限制，不是插件的问题：
+
+| 格式 | `syncedlyrics`（带时间轴） | `lyrics`（纯文本） | 想要带时间轴的歌词 |
+| --- | --- | --- | --- |
+| **MP3** (ID3) | ✅ 支持 | ✅ 支持 | 直接写进标签 |
+| **FLAC / OGG / Opus** (Vorbis) | ❌ **Picard 会丢弃** | ✅ 支持 | 只能靠 `.lrc` 边车文件 |
+| **MP4 / M4A** | ❌ **Picard 会丢弃** | ✅ 支持 | 只能靠 `.lrc` 边车文件 |
+
+原因：Picard 在 `picard/formats/vorbis.py` 和 `mp4.py` 里把 `syncedlyrics` 放进了
+`UNSUPPORTED_TAGS`，保存时由 `File._tags_to_update()` 过滤掉——**标签会被静默丢弃，
+文件甚至不会被标记为"已修改"**。只有 `id3.py` 的 `UNSUPPORTED_TAGS` 里没有它。
+
+所以插件现在会**先检测格式**：
+
+- 格式支持 → 正常写入 `syncedlyrics`
+- 格式不支持 → 跳过它（不再假装写入），改写入 `lyrics` 纯文本，并在日志里提示你
+  去勾选「保存时同时导出 .lrc 文件」
+
+**如果你的音乐是 FLAC 且想要滚动歌词，请勾选「保存时同时导出 .lrc 文件」**——
+插件会把带时间轴的内容写到音乐旁边的 `.lrc` 里，播放器读这个文件。
 
 ## 许可证
 

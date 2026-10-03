@@ -251,6 +251,30 @@ def _lrc_path(api: PluginApi, file) -> str:
     return path
 
 
+# Formats that cannot store the syncedlyrics tag. Picard lists it in their
+# UNSUPPORTED_TAGS and filters it out in File._tags_to_update(), so anything we
+# put there is silently dropped - the file is not even marked as changed.
+# Only ID3 (MP3, AIFF, WAV) can hold it; Vorbis (FLAC/OGG/Opus) and MP4 cannot.
+_ID3_EXTENSIONS = {'.mp3', '.aif', '.aifc', '.aiff', '.wav'}
+
+# Virtual tag used to keep the synced lyrics around for the .lrc export even
+# when the audio format cannot store them. Picard never writes tags whose name
+# starts with '~' to the file.
+SYNCED_CACHE_TAG = '~lyrics_fetcher_synced'
+
+
+def _supports_synced(file) -> bool:
+    """Whether this file's format can actually store the syncedlyrics tag."""
+    checker = getattr(file, 'supports_tag', None)
+    if callable(checker):
+        try:
+            return bool(checker('syncedlyrics'))
+        except Exception:  # pragma: no cover - defensive
+            pass
+    extension = os.path.splitext(getattr(file, 'filename', '') or '')[1].lower()
+    return extension in _ID3_EXTENSIONS
+
+
 # ---------------------------------------------------------------------------
 # record selection
 # ---------------------------------------------------------------------------
@@ -380,18 +404,26 @@ def _write_lyrics(ctx: _Lookup, description: str, synced: str, plain: str) -> No
     if not plain and synced:
         plain = _lrc_to_plain(synced)
 
+    can_store_synced = _supports_synced(ctx.file)
     replace = ctx.force or not _setting(api, 'never_replace')
+
+    # Keep the synced text for the .lrc export even when the format cannot
+    # store it in a tag.
+    if synced:
+        try:
+            metadata[SYNCED_CACHE_TAG] = synced
+        except Exception:  # pragma: no cover - defensive
+            pass
+
     written = []
-    if _setting(api, 'write_synced') and synced and (
-        replace or not metadata.get('syncedlyrics')
-    ):
-        metadata['syncedlyrics'] = synced
-        written.append('syncedlyrics')
-    if _setting(api, 'write_plain') and plain and (
-        replace or not metadata.get('lyrics')
-    ):
-        metadata['lyrics'] = plain
-        written.append('lyrics')
+    if _setting(api, 'write_synced') and synced and can_store_synced:
+        if replace or not metadata.get('syncedlyrics'):
+            metadata['syncedlyrics'] = synced
+            written.append('syncedlyrics')
+    if _setting(api, 'write_plain') and plain:
+        if replace or not metadata.get('lyrics'):
+            metadata['lyrics'] = plain
+            written.append('lyrics')
 
     if written:
         api.logger.info(
@@ -399,6 +431,23 @@ def _write_lyrics(ctx: _Lookup, description: str, synced: str, plain: str) -> No
         )
     else:
         api.logger.debug('Lyrics: nothing to write for %s', ctx.file.filename)
+
+    if synced and not can_store_synced:
+        extension = os.path.splitext(ctx.file.filename)[1].lstrip('.').upper() or 'this'
+        if written:
+            api.logger.info(
+                'Lyrics: %s — %s files cannot store the syncedlyrics tag (Picard drops it). '
+                'Enable "Also export a .lrc file when saving" to keep the timestamps in a '
+                'sidecar file.',
+                os.path.basename(ctx.file.filename), extension,
+            )
+        else:
+            api.logger.warning(
+                'Lyrics: %s — %s files cannot store the syncedlyrics tag, and plain lyrics '
+                'were not written either. Enable "Write plain lyrics" and/or "Also export a '
+                '.lrc file when saving" in the Lyrics Fetcher options.',
+                os.path.basename(ctx.file.filename), extension,
+            )
     ctx.finish()
 
 
@@ -705,7 +754,13 @@ def _on_file_saved(api: PluginApi, file) -> None:
         return
 
     metadata = file.metadata
-    lyrics = metadata.get('syncedlyrics') or metadata.get('lyrics')
+    # Prefer the synced text we cached during the lookup: for formats that
+    # cannot store the syncedlyrics tag this is the only copy left.
+    lyrics = (
+        metadata.get(SYNCED_CACHE_TAG)
+        or metadata.get('syncedlyrics')
+        or metadata.get('lyrics')
+    )
     if not lyrics:
         return
 
@@ -777,10 +832,11 @@ class LrclibLyricsOptionsPage(OptionsPage):
 
         note = QLabel(self._tr(
             'option.note',
-            'The "syncedlyrics" tag is only supported for MP3 and FLAC/OGG; MP4/M4A cannot '
-            'store synced lyrics, so enable plain lyrics for those. Neither source matches '
-            'on MusicBrainz IDs, so mismatches are possible — skim the lyrics before saving. '
-            'NetEase uses undocumented web endpoints and may stop working without notice.',
+            'Only MP3 (ID3) can store the "syncedlyrics" tag — FLAC, OGG/Opus and MP4/M4A '
+            'silently drop it, so for those enable "Write plain lyrics" and/or the .lrc '
+            'export. Neither source matches on MusicBrainz IDs, so mismatches are possible '
+            '— skim the lyrics before saving. NetEase uses undocumented web endpoints and '
+            'may stop working without notice.',
         ))
         note.setWordWrap(True)
 
