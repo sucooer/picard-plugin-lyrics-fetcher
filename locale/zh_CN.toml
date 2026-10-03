@@ -1,0 +1,8 @@
+"option.enabled" = "自动从 LRCLIB 获取歌词"
+"option.write_synced" = "写入带时间轴的歌词到 \"syncedlyrics\" 标签"
+"option.write_plain" = "写入无时间轴的纯文本歌词到 \"lyrics\" 标签"
+"option.never_replace" = "已有歌词时不覆盖"
+"option.export_lrc" = "保存时同时导出 .lrc 文件"
+"option.lrc_never_replace" = "已存在 .lrc 文件时不覆盖"
+"option.lrc_filename" = ".lrc 文件的命名规则："
+"option.note" = "注意：\"syncedlyrics\" 标签只支持 MP3 和 FLAC/OGG，MP4/M4A 无法保存带时间轴的歌词——这类文件请勾选写入纯文本歌词。"
