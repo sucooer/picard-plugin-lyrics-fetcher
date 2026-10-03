@@ -1,0 +1,28 @@
+uuid = "3431b825-145a-4696-9785-542dea651391"
+name = "LRCLIB Lyrics"
+description = "Fetch synced and plain lyrics from lrclib.net and write them to your files"
+long_description = """
+Fetches lyrics from [LRCLIB](https://lrclib.net) and writes them into your audio files.
+
+Features:
+- Writes **synced lyrics** (with timestamps) to the `syncedlyrics` tag
+- Writes **plain lyrics** to the `lyrics` tag
+- Optionally exports a `.lrc` sidecar file next to the audio file
+- Option to never overwrite lyrics that are already present
+
+Requirements:
+- MusicBrainz Picard 3.0 or newer
+- The `syncedlyrics` tag is only supported for formats that can store it:
+  ID3 (MP3) and Vorbis (FLAC, OGG, Opus). It is not supported for MP4/M4A.
+
+Note: LRCLIB matches tracks by artist, title, album and duration, not by
+MusicBrainz ID. Occasional mismatches are possible, so it is worth skimming
+the lyrics before saving.
+"""
+api = ["3.0"]
+authors = ["Generated with WorkBuddy AI"]
+license = "GPL-2.0-or-later"
+license_url = "https://www.gnu.org/licenses/gpl-2.0.html"
+categories = ["metadata"]
+min_python_version = "3.10"
+source_locale = "en"
