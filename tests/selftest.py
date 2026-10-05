@@ -459,6 +459,13 @@ CREDIT_CASES = [
     'Disc: X', 'Publisher: X', 'Copyright: X', 'ISRC: X', 'Source: X',
     'Vocals recorded by: X', 'Drum Programming: X', '© 2026 Sony', 'Feat. X',
     'Produced by John', '未经许可，不得翻唱', '版权所有：X', '版权归：X',
+    # Performers and instruments (reported by the user for a Japanese release)
+    '编程：大森元贵/Ryo Hanai', '电吉他：Hiloto Wakai/大森元贵',
+    '键盘：Ryoka Fujisawa', '鼓：Hideyuki Kurakazu',
+    '贝斯：X', '小提琴：X', '大提琴：X', '合成器：X', '打击乐：X', '架子鼓：X',
+    '木吉他：X', '原声吉他：X', '三味线：X', 'Programming: X',
+    'Electric Guitar: X', 'Acoustic Guitar: X', 'Drums: X', 'Keyboards: X',
+    'Synthesizer: X', 'Percussion: X',
 ]
 LYRIC_CASES = [
     '凪の海に漂うように', '正解だけが朽ち果てる世の中', '愛は: どこ', '作曲家的名字',
@@ -468,6 +475,9 @@ LYRIC_CASES = [
     'Chorus of angels', '未经许可我闯进你的世界', 'Featuring you in my dream',
     'Mixed feelings: I cry', 'Music by the sea', 'Words by the river',
     'Vocals of the wind',
+    # Bare 鼓 must only match with the colon right after it, otherwise these go.
+    '鼓起勇气：往前走', '鼓声：在夜里回响', '鼓励：你做到了吗', '鼓动：我的心跳',
+    '键盘上的舞者', '电吉他响起来', '编程人生', '鼓手的心跳', '贝斯的低音线',
 ]
 
 
@@ -534,6 +544,54 @@ check('leading "词 : X" (space before colon) is removed',
 check('mid-song "词 : X" with a gap is kept',
       plugin._strip_credits('[00:01.00] a\n[00:02.00] 词 不 : X').strip()
       == '[00:01.00] a\n[00:02.00] 词 不 : X')
+
+print()
+print('=== 2e. performer credits: leading block and mid-song ===')
+# Reported by the user: a Japanese release listed the players as
+# "[00:00.363]编程：…", "[00:00.604]电吉他：…" and so on.
+PERFORMERS = '\n'.join([
+    '[00:00.363]编程：大森元贵/Ryo Hanai',
+    '[00:00.604]电吉他：Hiloto Wakai/大森元贵',
+    '[00:00.781]键盘：Ryoka Fujisawa',
+    '[00:00.964]鼓：Hideyuki Kurakazu',
+    '[00:01.200]作词 : 大森元貴',
+    '[00:01.400]作曲 : 大森元貴',
+    '[00:24.850]拾い集めて',
+    '[00:26.100]更に探す東京',
+])
+out = plugin._strip_credits(PERFORMERS)
+check('the performer block is removed', '编程' not in out and '电吉他' not in out)
+check('作词/作曲 alongside it are removed too',
+      '作词' not in out and '作曲' not in out)
+check('the real lyrics survive', out.strip() == '[00:24.850]拾い集めて\n[00:26.100]更に探す東京',
+      repr(out))
+
+# Mid-song performer credits are removed as well...
+MIXED = '\n'.join([
+    '[00:24.850]拾い集めて',
+    '[00:30.000]鼓：Hideyuki Kurakazu',
+    '[00:32.000]电吉他：Hiloto Wakai',
+    '[00:34.000]编程：大森元贵',
+    '[00:36.000]更に探す東京',
+])
+out = plugin._strip_credits(MIXED)
+check('mid-song performer credits are removed',
+      out.strip() == '[00:24.850]拾い集めて\n[00:36.000]更に探す東京', repr(out))
+
+# ...but lyric lines that merely start with one of those words are untouched.
+SINGABLE = '\n'.join([
+    '[00:24.850]拾い集めて',
+    '[00:30.000]鼓起勇气：往前走',
+    '[00:32.000]鼓声：在夜里回响',
+    '[00:34.000]鼓励：你做到了吗',
+    '[00:36.000]鼓动：我的心跳',
+    '[00:38.000]键盘上的舞者',
+    '[00:40.000]电吉他响起来',
+    '[00:42.000]更に探す東京',
+])
+out = plugin._strip_credits(SINGABLE)
+check('singable lines starting with 鼓/键盘/电吉他 are all kept',
+      len([ln for ln in out.splitlines() if ln.strip()]) == 8, repr(out))
 
 print()
 print('=== 3. _merge_translation ===')

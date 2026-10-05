@@ -105,6 +105,15 @@ _CREDIT = re.compile(
     r'出品|出品人|出品公司|唱片公司|版权|版权所有|版权归|授权|未经许可|禁止转载|'
     r'鸣谢|特别鸣谢|提供|作品|词作者|曲作者|编者|翻译|译者|歌词翻译|音译|'
     r'LRC|歌词制作|歌词编辑|OP|SP|'
+    # Performers and instruments. NetEase lists these for Japanese releases
+    # ("编程：…", "电吉他：…", "键盘：…", "鼓：…").
+    r'编程|演奏|器乐|伴奏|配乐|'
+    r'吉他|电吉他|木吉他|原声吉他|民谣吉他|贝斯|电贝斯|低音吉他|'
+    r'键盘|键盘手|钢琴|电子琴|合成器|音效|采样|'
+    r'弦乐|小提琴|中提琴|大提琴|低音提琴|竖琴|'
+    r'鼓手|鼓组|架子鼓|打击乐|'
+    r'萨克斯|长笛|短笛|单簧管|双簧管|小号|长号|圆号|口琴|手风琴|'
+    r'笛子|二胡|古筝|琵琶|唢呐|三味线|尺八|太鼓|'
     # Traditional Chinese
     r'作詞|編曲|詩曲|'
     # English
@@ -119,7 +128,9 @@ _CREDIT = re.compile(
     r'Copyright|Licensed by|ISRC|'
     r'Transcribed by|Translated by|Subtitle|Subtitles|Source|'
     r'Orchestration by|Drum Programming|Drums by|Violin and Viola by|'
-    r'Vocals recorded by'
+    r'Vocals recorded by|'
+    r'Programming|Electric Guitar|Acoustic Guitar|Drums|Keyboards|'
+    r'Synthesizer|Percussion|Saxophone|Harmonica|Accordion'
     r')[^:：]{0,6}[:：]',
     re.IGNORECASE,
 )
@@ -130,8 +141,10 @@ _CREDIT = re.compile(
 #     region is credits by construction;
 #   - anywhere else the colon must follow immediately, so "词：XXX" is still
 #     removed but "词不达意: ..." is kept.
-_CREDIT_SINGLE = re.compile(r'^(?:词|曲|詞|词曲)[^:：]{0,6}[:：]')
-_CREDIT_SINGLE_STRICT = re.compile(r'^(?:词|曲|詞|词曲)\s*[:：]')
+# Bare 鼓 sits here for the same reason: "鼓：Hideyuki Kurakazu" is a credit,
+# while "鼓起勇气：..." must survive.
+_CREDIT_SINGLE = re.compile(r'^(?:词|曲|詞|词曲|鼓)[^:：]{0,6}[:：]')
+_CREDIT_SINGLE_STRICT = re.compile(r'^(?:词|曲|詞|词曲|鼓)\s*[:：]')
 
 # Credits that never carry a colon, so the rule above cannot see them:
 # "Produced by X", "Feat. Y", "© 2026 Sony", "未经许可，不得翻唱或使用".
