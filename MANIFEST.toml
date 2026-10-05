@@ -10,6 +10,8 @@ Features:
 - Optionally exports a `.lrc` sidecar file next to the audio file
 - Option to never overwrite lyrics that are already present
 - NetEase: drops the leading credits block (作词/作曲/编曲 …) from the lyrics
+- Drops credit and metadata lines anywhere in the lyrics, including performer
+  credits (作词/作曲/编曲/混音/编程/电吉他/键盘/鼓 …) and empty timestamp lines
 - NetEase: can append the Chinese translation to each line (bilingual lyrics)
 - Choose the source, or use "NetEase first, then LRCLIB" so that a miss in one
   is automatically retried against the other
