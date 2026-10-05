@@ -227,21 +227,28 @@ def _setting(api: PluginApi, name: str):
     return DEFAULTS[name] if value is None else value
 
 
-def _source_order(api: PluginApi):
-    """Return the sources to try, in order.
+# The order the sources are tried in, which is also the order they are listed
+# in the options page.
+SOURCE_ORDER = (SOURCE_NETEASE, SOURCE_KUGOU, SOURCE_LRCLIB)
 
-    The default walks NetEase, then Kugou, then LRCLIB: NetEase covers the most
-    ground for Chinese and Japanese releases, Kugou fills some of its gaps, and
-    LRCLIB is the stable public fallback.
+# Stored in the "source" setting when the user unticks every source.
+SOURCE_NONE = 'none'
+
+
+def _source_order(api: PluginApi):
+    """Return the enabled sources, in the fixed order.
+
+    The setting holds a comma separated list of the ticked sources, so any
+    combination works. The older single-value forms still parse: "auto" and an
+    empty value both mean all three.
     """
-    source = (_setting(api, 'source') or SOURCE_AUTO).lower()
-    if source == SOURCE_NETEASE:
-        return (SOURCE_NETEASE,)
-    if source == SOURCE_KUGOU:
-        return (SOURCE_KUGOU,)
-    if source == SOURCE_LRCLIB:
-        return (SOURCE_LRCLIB,)
-    return (SOURCE_NETEASE, SOURCE_KUGOU, SOURCE_LRCLIB)
+    raw = (_setting(api, 'source') or '').strip().lower()
+    if not raw or raw == SOURCE_AUTO:
+        return SOURCE_ORDER
+    if raw == SOURCE_NONE:
+        return ()
+    chosen = {part.strip() for part in raw.split(',')}
+    return tuple(source for source in SOURCE_ORDER if source in chosen) or SOURCE_ORDER
 
 
 # ---------------------------------------------------------------------------
@@ -822,8 +829,14 @@ def _begin_lookup(api: PluginApi, track, file, force=False, use_album_task=True)
     if use_album_task and album is not None:
         task_id = 'lyrics_%d' % (abs(hash(file.filename)) & 0x7FFFFFFF)
 
-    ctx = _Lookup(api, file, album, task_id, force=force)
     sources = _source_order(api)
+    if not sources:
+        api.logger.warning(
+            'Lyrics: no lyrics source is ticked, skipping %s', file.filename
+        )
+        return False
+
+    ctx = _Lookup(api, file, album, task_id, force=force)
 
     # Picard calls request_factory() inside add_album_task(). Guard against the
     # chain being started twice if anything after that raises, so a failure can
@@ -1257,14 +1270,14 @@ class LrclibLyricsOptionsPage(OptionsPage):
         super().__init__(parent)
         self._api = getattr(self, 'api', None)
 
-        self.lbl_source = QLabel(self._tr('option.source', 'Lyrics source:'))
-        self.cmb_source = QComboBox()
-        self.cmb_source.addItem(
-            self._tr('option.source.auto', 'NetEase, then Kugou, then LRCLIB'), SOURCE_AUTO
+        self.lbl_source = QLabel(self._tr(
+            'option.source', 'Sources to search, tried in this order:'
+        ))
+        self.cb_netease = QCheckBox(
+            self._tr('option.source.netease', 'NetEase Cloud Music')
         )
-        self.cmb_source.addItem(self._tr('option.source.netease', 'NetEase only'), SOURCE_NETEASE)
-        self.cmb_source.addItem(self._tr('option.source.kugou', 'Kugou only'), SOURCE_KUGOU)
-        self.cmb_source.addItem(self._tr('option.source.lrclib', 'LRCLIB only'), SOURCE_LRCLIB)
+        self.cb_kugou = QCheckBox(self._tr('option.source.kugou', 'Kugou'))
+        self.cb_lrclib = QCheckBox(self._tr('option.source.lrclib', 'LRCLIB'))
 
         self.cb_write_tags = QCheckBox(
             self._tr('option.write_tags', 'Write lyrics into the audio tags')
@@ -1302,7 +1315,9 @@ class LrclibLyricsOptionsPage(OptionsPage):
 
         layout = QVBoxLayout(self)
         layout.addWidget(self.lbl_source)
-        layout.addWidget(self.cmb_source)
+        layout.addWidget(self.cb_netease)
+        layout.addWidget(self.cb_kugou)
+        layout.addWidget(self.cb_lrclib)
         layout.addWidget(self.cb_write_tags)
         layout.addWidget(self.cb_clean)
         layout.addWidget(self.cb_translation)
@@ -1332,7 +1347,10 @@ class LrclibLyricsOptionsPage(OptionsPage):
         self.cb_clean.setChecked(bool(_setting(api, 'clean_lyrics')))
         self.cb_translation.setChecked(bool(_setting(api, 'netease_add_translation')))
         self.cb_never_replace.setChecked(bool(_setting(api, 'never_replace')))
-        self._select(self.cmb_source, _setting(api, 'source'), SOURCE_AUTO)
+        enabled = _source_order(api)
+        self.cb_netease.setChecked(SOURCE_NETEASE in enabled)
+        self.cb_kugou.setChecked(SOURCE_KUGOU in enabled)
+        self.cb_lrclib.setChecked(SOURCE_LRCLIB in enabled)
         self._select(self.cmb_lrc, _setting(api, 'lrc_mode'), LRC_NEVER)
 
     def save(self) -> None:
@@ -1341,7 +1359,14 @@ class LrclibLyricsOptionsPage(OptionsPage):
         config['clean_lyrics'] = self.cb_clean.isChecked()
         config['netease_add_translation'] = self.cb_translation.isChecked()
         config['never_replace'] = self.cb_never_replace.isChecked()
-        config['source'] = self.cmb_source.currentData() or SOURCE_AUTO
+        ticked = [
+            source for source, box in (
+                (SOURCE_NETEASE, self.cb_netease),
+                (SOURCE_KUGOU, self.cb_kugou),
+                (SOURCE_LRCLIB, self.cb_lrclib),
+            ) if box.isChecked()
+        ]
+        config['source'] = ','.join(ticked) if ticked else SOURCE_NONE
         config['lrc_mode'] = self.cmb_lrc.currentData() or LRC_NEVER
 
 
