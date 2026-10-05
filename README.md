@@ -1,10 +1,10 @@
 # Lyrics Fetcher
 
-为 MusicBrainz Picard 3 抓取歌词的插件，支持 **网易云音乐** 和 **LRCLIB** 两个来源。
+为 MusicBrainz Picard 3 抓取歌词的插件，支持 **网易云音乐**、**酷狗音乐** 和 **LRCLIB** 三个来源。
 
 ## 功能
 
-- 从**网易云音乐**和 **LRCLIB** 抓取歌词，写入音频标签
+- 从**网易云音乐**、**酷狗音乐** 和 **LRCLIB** 抓取歌词，写入音频标签
 - MP3 写入 `syncedlyrics`（带时间轴）；FLAC/OGG/M4A 存不了，就把带时间轴的 LRC
   写进 `lyrics` 标签
 - 清理歌词：去掉开头的制作人员信息（`作词 : XXX`）和只有时间轴的空行
@@ -12,13 +12,13 @@
 - 可选：网易云追加中文翻译，生成**双语歌词**
 - 可选：导出 `.lrc` 边车文件（默认**不导出**）
 - 可选：已有歌词时不覆盖
-- 来源可选，默认「先用网易云，失败自动改用 LRCLIB」
+- 来源可选，默认「先用网易云，再用酷狗，最后用 LRCLIB」
 
 ## 选项（一共 6 项）
 
 | 选项 | 默认 | 说明 |
 | --- | --- | --- |
-| 歌词来源 | 先用网易云，失败则用 LRCLIB | 也可固定只用某一个 |
+| 歌词来源 | 先用网易云，再用酷狗，最后用 LRCLIB | 也可固定只用某一个 |
 | 把歌词写入音频标签 | ✅ | 关掉就完全不抓取 |
 | 清理歌词 | ✅ | 去掉制作人员信息和空行 |
 | 网易云：追加中文翻译 | ☐ | 双语歌词 |
@@ -47,7 +47,7 @@ picard-cli plugins install /path/to/picard-plugin-lrclib-lyrics
 ### 手动触发（右键菜单）
 
 自动抓取不灵、或者想单独给几首歌补歌词时，选中曲目或专辑 →
-**右键 → `Fetch lyrics (NetEase / LRCLIB)`**。
+**右键 → `Fetch lyrics (NetEase / Kugou / LRCLIB)`**。
 
 手动触发会**忽略「已有歌词时不覆盖」**（你都主动点了），其余设置照常生效。
 它也会处理没匹配到 MusicBrainz 的曲目——只要文件本身有标题和艺人标签就行。
@@ -62,24 +62,27 @@ picard-cli plugins install /path/to/picard-plugin-lrclib-lyrics
 | `automatic lookup hook is active` | 自动抓取的钩子被触发了（每次启动只打一次） |
 | `already has lyrics and "never replace" is enabled` | 文件已有歌词，被「不覆盖」挡住了 |
 | `has no title and/or artist tag` | 文件缺少标题或艺人标签，无法查询 |
-| `NetEase returned no results` / `no LRCLIB entry` | 两个来源都没收录 |
-| `— NetEase "..." by ...` | **成功**，后面是选中的记录（含时长和专辑名） |
+| `NetEase returned no results` / `Kugou returned no results` / `no LRCLIB entry` | 对应来源没收录 |
+| `— NetEase "..." by ...` / `— Kugou "..."` | **成功**，后面是选中的记录（含时长和专辑名） |
 
 如果连 `automatic lookup hook is active` 都没有，说明钩子没被触发，直接用右键菜单。
 
-## 两个来源的取舍
+## 三个来源的取舍
 
-| | 网易云音乐 | LRCLIB |
-| --- | --- | --- |
-| 中文歌 | **很强** | 一般 |
-| 日文歌 / 动漫 OST | **很强** | 一般 |
-| 欧美歌 | 强 | 强 |
-| 版权下架的曲目 | 查不到（例如周杰伦原版） | 可能有 |
-| 额外福利 | 中文翻译、罗马音 | 无 |
-| 接口稳定性 | 非公开网页接口，可能失效 | 公开 API，稳定 |
+| | 网易云音乐 | 酷狗音乐 | LRCLIB |
+| --- | --- | --- | --- |
+| 中文歌 | **很强** | 强 | 一般 |
+| 日文歌 / 动漫 OST | **很强** | 强 | 一般 |
+| 欧美歌 | 强 | 一般 | 强 |
+| 版权下架的曲目 | 查不到（例如周杰伦原版） | 可能有 | 可能有 |
+| 额外福利 | 中文翻译、罗马音 | 无 | 无 |
+| 接口稳定性 | 非公开网页接口，可能失效 | 非公开网页接口，可能失效 | 公开 API，稳定 |
 
-所以默认是 **auto**：先查网易云，查不到再查 LRCLIB。实测 7 首中日英混合曲目
-**7/7 全部命中**，而只用 LRCLIB 是 6/7。
+所以默认是 **auto**：网易云 → 酷狗 → LRCLIB，任一处命中就停。
+
+实测 Mrs. GREEN APPLE《POPS》(2026) 整张 16 首：网易云覆盖 14 首，酷狗单独
+覆盖 10 首，而**网易云 + 酷狗合起来 16/16**——酷狗正好补上网易云缺的两首。
+LRCLIB 在这张专辑上只有 10 首。
 
 ### 网易云为什么走 HTTP/1.1
 
@@ -98,6 +101,23 @@ Picard 的网络层默认协商 **HTTP/2**，而 `music.163.com` 的 CDN 会**�
 HTTP/1.1 不仅 3/3 成功，还快十倍。所以插件为网易云单独建了一个
 `QNetworkAccessManager`，关掉 `Http2AllowedAttribute`（仍遵循系统的代理设置）。
 LRCLIB 继续走 Picard 自带的 web service。
+
+### 酷狗接口的两个坑
+
+酷狗走 Picard 自带的 web service（不像网易云那样需要自建 HTTP/1.1 客户端），
+但有两个地方要注意：
+
+1. **歌词接口三个参数缺一不可**：
+   `?keyword=<歌名>&hash=<hash>&timelength=<毫秒>`
+   - 只给 `hash` → 返回空 body
+   - 只给 `keyword` + `hash` → **HTTP 500**
+   - `timelength` 是**毫秒**
+2. **两个接口都返回 `Content-Type: text/html`**（不是 `application/json`），
+   所以插件请求时不带解析器，自己解码 body。
+
+另外酷狗歌词的**第一行是 `[00:00.xx]歌名 - 艺人`**（标题行），插件会连它
+一起清掉；随后几行是 `词：`/`曲：`/`制作人：`，也在清理范围内。
+
 
 ## 匹配策略
 
