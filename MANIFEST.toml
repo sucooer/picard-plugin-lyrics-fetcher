@@ -29,7 +29,7 @@ Caveats:
   undocumented and may change or start refusing requests without notice.
 """
 api = ["3.0"]
-authors = ["Generated with WorkBuddy AI"]
+authors = ["sucooer"]
 license = "GPL-2.0-or-later"
 license_url = "https://www.gnu.org/licenses/gpl-2.0.html"
 categories = ["metadata"]

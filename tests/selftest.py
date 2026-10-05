@@ -707,6 +707,36 @@ check('lrclib -> lrclib only',
       plugin._source_order(FakeApi(FakeConfig(source='lrclib'))) == ('lrclib',))
 check('unset -> auto',
       plugin._source_order(FakeApi(FakeConfig())) == ('netease', 'kugou', 'lrclib'))
+# The options page stores a comma separated list of the ticked sources.
+check('two ticked -> just those two',
+      plugin._source_order(FakeApi(FakeConfig(source='netease,kugou')))
+      == ('netease', 'kugou'))
+check('another pair',
+      plugin._source_order(FakeApi(FakeConfig(source='kugou,lrclib')))
+      == ('kugou', 'lrclib'))
+check('the stored order does not matter, the fixed order wins',
+      plugin._source_order(FakeApi(FakeConfig(source='lrclib,netease')))
+      == ('netease', 'lrclib'))
+check('all three ticked',
+      plugin._source_order(FakeApi(FakeConfig(source='netease,kugou,lrclib')))
+      == ('netease', 'kugou', 'lrclib'))
+check('"none" -> no sources',
+      plugin._source_order(FakeApi(FakeConfig(source='none'))) == ())
+check('an unknown value falls back to all three',
+      plugin._source_order(FakeApi(FakeConfig(source='spotify')))
+      == ('netease', 'kugou', 'lrclib'))
+check('whitespace is tolerated',
+      plugin._source_order(FakeApi(FakeConfig(source=' netease , kugou ')))
+      == ('netease', 'kugou'))
+
+# With nothing ticked the lookup must not fire a request at all.
+api = FakeApi(FakeConfig(**dict(DEFAULTS, source='none')), REPORTED)
+meta = {'title': '嵐の中でも', 'artist': '藍井エイル', '~length': '4:41'}
+plugin._on_file_added(api, FakeTrack(FakeAlbum()),
+                      FakeFile(os.path.join(tempfile.mkdtemp(), 'nosrc.mp3'), meta))
+check('no source ticked -> no request', api.web_service.calls == [])
+check('no source ticked -> nothing written', 'lyrics' not in meta)
+check('no source ticked -> warned', api.logger.has('no lyrics source is ticked'))
 
 print()
 print('=== 8. full chain: the reported track via NetEase ===')
