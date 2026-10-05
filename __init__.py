@@ -32,6 +32,9 @@ from picard.plugin3.api import BaseAction, OptionsPage, PluginApi
 # non-Latin scripts. The trade-off is that we must pick the right record
 # ourselves, which is what _pick_lrclib() does.
 LRCLIB_SEARCH_URL = 'https://lrclib.net/api/search'
+# Fetching a record by id returns the current revision. The search endpoint can
+# hand back a stale view of the very same record (see _request_lrclib_by_id).
+LRCLIB_GET_URL = 'https://lrclib.net/api/get/'
 
 # --- NetEase Cloud Music ----------------------------------------------------
 # These are the public web endpoints the music.163.com player itself calls.
@@ -976,13 +979,52 @@ def _on_lrclib_search(ctx: _Lookup, sources, index, document, reply, error):
         ctx.finish()
         return None
 
+    # LRCLIB's search can return a stale revision of a record. Querying with
+    # track_name + artist_name has been observed to hand back a copy without
+    # syncedLyrics for a record whose synced lyrics do exist - the same id came
+    # back with 1330 characters from /api/get/<id> and from a search that
+    # included album_name or duration. When the pick has no synced text but we
+    # do have an id, refetch it directly.
+    if not (best.get('syncedLyrics') or '').strip() and best.get('id'):
+        return _request_lrclib_by_id(ctx, best, sources, index)
+
+    return _write_lrclib(ctx, best)
+
+
+def _write_lrclib(ctx: _Lookup, record):
+    """Write the lyrics carried by a LRCLIB record."""
     description = 'LRCLIB "%s" by %s (%ss, album %s)' % (
-        best.get('trackName'), best.get('artistName'),
-        best.get('duration'), best.get('albumName'),
+        record.get('trackName'), record.get('artistName'),
+        record.get('duration'), record.get('albumName'),
     )
     return _write_lyrics(
-        ctx, description, best.get('syncedLyrics') or '', best.get('plainLyrics') or ''
+        ctx, description, record.get('syncedLyrics') or '', record.get('plainLyrics') or ''
     )
+
+
+def _request_lrclib_by_id(ctx: _Lookup, record, sources, index):
+    """Fetch a LRCLIB record by id, bypassing the possibly stale search view."""
+    return ctx.api.web_service.get_url(
+        url=LRCLIB_GET_URL + str(record['id']),
+        handler=partial(_on_lrclib_by_id, ctx, record, sources, index),
+        parse_response_type='json',
+        priority=True,
+    )
+
+
+def _on_lrclib_by_id(ctx: _Lookup, record, sources, index, document, reply, error):
+    if not error and isinstance(document, dict) and (
+        document.get('syncedLyrics') or ''
+    ).strip():
+        ctx.api.logger.info(
+            'Lyrics: LRCLIB search had no synced lyrics for %s, '
+            '/api/get/%s supplied them',
+            ctx.file.filename, record.get('id'),
+        )
+        return _write_lrclib(ctx, document)
+    # The direct fetch did not help, so keep what the search gave us rather
+    # than losing the lookup entirely.
+    return _write_lrclib(ctx, record)
 
 
 # ---------------------------------------------------------------------------
