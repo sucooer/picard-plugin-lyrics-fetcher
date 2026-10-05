@@ -1434,6 +1434,66 @@ check('a pre-supplied client is reused',
       plugin._netease_client(api) is pre)
 
 print()
+print('=== 25. LRCLIB: a stale search view is refetched by id ===')
+# Observed against the live API: /api/search with track_name + artist_name can
+# hand back a revision without syncedLyrics for a record whose synced lyrics do
+# exist. The same id returns 1330 characters from /api/get/<id>, and from a
+# search that also carried album_name or duration.
+STALE = [{
+    'id': 38948936, 'trackName': '共犯', 'artistName': 'Mrs. GREEN APPLE',
+    'albumName': 'POPS', 'duration': 231.0,
+    'syncedLyrics': None, 'plainLyrics': '拾い集めて\n更に探す東京\n' * 40,
+}]
+FRESH = {
+    'id': 38948936, 'trackName': '共犯', 'artistName': 'Mrs. GREEN APPLE',
+    'albumName': 'POPS', 'duration': 231.0,
+    'syncedLyrics': '[00:24.85]拾い集めて\n[00:26.10]更に探す東京\n',
+    'plainLyrics': '拾い集めて\n更に探す東京\n',
+}
+BY_ID = plugin.LRCLIB_GET_URL + '38948936'
+
+responses = {plugin.LRCLIB_SEARCH_URL: (STALE, None), BY_ID: (FRESH, None)}
+api = FakeApi(FakeConfig(**dict(DEFAULTS, source='lrclib')), responses)
+meta = {'title': '共犯', 'artist': 'Mrs. GREEN APPLE', '~length': '3:51'}
+plugin._on_file_added(api, FakeTrack(FakeAlbum()),
+                      FakeFile(os.path.join(tmp, 'kyohan.flac'), meta))
+urls = [c['url'] for c in api.web_service.calls]
+check('the record is refetched by id', urls == [plugin.LRCLIB_SEARCH_URL, BY_ID], str(urls))
+check('synced lyrics from the direct fetch are used',
+      '[00:24.85]' in (meta.get('lyrics') or ''), repr((meta.get('lyrics') or '')[:40]))
+check('the refetch is logged', api.logger.has('supplied them'))
+check('task completed once', len(api.completed) == 1, str(api.completed))
+
+# If the direct fetch is no better, the search copy is kept rather than lost.
+STILL_PLAIN = dict(FRESH, syncedLyrics=None)
+responses = {plugin.LRCLIB_SEARCH_URL: (STALE, None), BY_ID: (STILL_PLAIN, None)}
+api = FakeApi(FakeConfig(**dict(DEFAULTS, source='lrclib')), responses)
+meta = {'title': '共犯', 'artist': 'Mrs. GREEN APPLE', '~length': '3:51'}
+plugin._on_file_added(api, FakeTrack(FakeAlbum()),
+                      FakeFile(os.path.join(tmp, 'kyohan2.flac'), meta))
+check('plain lyrics still written when the refetch has nothing better',
+      bool(meta.get('lyrics')) and '[00:' not in meta['lyrics'])
+check('task still completed once', len(api.completed) == 1)
+
+# A failing refetch must not lose the lyrics we already had.
+responses = {plugin.LRCLIB_SEARCH_URL: (STALE, None), BY_ID: (None, 'boom')}
+api = FakeApi(FakeConfig(**dict(DEFAULTS, source='lrclib')), responses)
+meta = {'title': '共犯', 'artist': 'Mrs. GREEN APPLE', '~length': '3:51'}
+plugin._on_file_added(api, FakeTrack(FakeAlbum()),
+                      FakeFile(os.path.join(tmp, 'kyohan3.flac'), meta))
+check('a failed refetch keeps the search copy', bool(meta.get('lyrics')))
+
+# When the search already carries synced lyrics, no extra request is made.
+responses = {plugin.LRCLIB_SEARCH_URL: ([FRESH], None)}
+api = FakeApi(FakeConfig(**dict(DEFAULTS, source='lrclib')), responses)
+meta = {'title': '共犯', 'artist': 'Mrs. GREEN APPLE', '~length': '3:51'}
+plugin._on_file_added(api, FakeTrack(FakeAlbum()),
+                      FakeFile(os.path.join(tmp, 'kyohan4.flac'), meta))
+check('no refetch when synced lyrics are already present',
+      [c['url'] for c in api.web_service.calls] == [plugin.LRCLIB_SEARCH_URL],
+      str([c['url'] for c in api.web_service.calls]))
+
+print()
 failed = [n for n, ok, _ in RESULTS if not ok]
 print('=' * 76)
 print('%d checks, %d passed, %d failed' % (len(RESULTS), len(RESULTS) - len(failed), len(failed)))
