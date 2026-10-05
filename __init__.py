@@ -53,10 +53,22 @@ NETEASE_SEARCH_LIMIT = 10
 # same track under several releases and only some of them carry lyrics.
 NETEASE_CANDIDATES = 4
 
+# --- Kugou ------------------------------------------------------------------
+# Also undocumented web endpoints, taken from what the Kugou apps call. The
+# lyric call needs all three parameters: keyword and hash alone return an empty
+# body or HTTP 500. Both answers come back as text/html, so they are read raw
+# and decoded here rather than through Picard's JSON response parser.
+KUGOU_SEARCH_URL = 'http://mobilecdn.kugou.com/api/v3/search/song'
+KUGOU_LYRIC_URL = 'https://m3ws.kugou.com/api/v1/krc/get_krc'
+KUGOU_HEADERS = {'Referer': 'https://www.kugou.com/'}
+KUGOU_SEARCH_LIMIT = 10
+KUGOU_CANDIDATES = 4
+
 LRC_NAME_PATTERN = '%filename%.lrc'
 
 SOURCE_AUTO = 'auto'
 SOURCE_NETEASE = 'netease'
+SOURCE_KUGOU = 'kugou'
 SOURCE_LRCLIB = 'lrclib'
 
 LRC_NEVER = 'never'
@@ -88,6 +100,10 @@ DEFAULTS.update(TEXT_SETTINGS)
 _LRC_TIME = re.compile(r'\[(\d+):(\d+(?:[.:]\d+)?)[^\]]*\]')
 # [ti:...] [ar:...] [al:...] [by:...] [offset:...] etc.
 _LRC_META = re.compile(r'^\[[a-zA-Z]+:.*\]$')
+# NetEase and Kugou often open the lyrics with a "[00:00.xx] Title - Artist"
+# line. The spaces around the dash are required, so a first lyric line such as
+# "[00:00.00]ラブ-ソング" is not mistaken for one.
+_TITLE_LINE = re.compile(r'^\[00:00(?:[.:]\d+)?\]\s*\S.*\s[-–—－]\s')
 # Credit lines such as "作词 : GAK-amazuti-" or "混音工程师: You Yokoi".
 # Up to six characters may sit between the keyword and the colon, which covers
 # the common "...工程师" / "...制作人" suffixes. The keyword list is shared with
@@ -212,13 +228,20 @@ def _setting(api: PluginApi, name: str):
 
 
 def _source_order(api: PluginApi):
-    """Return the sources to try, in order."""
+    """Return the sources to try, in order.
+
+    The default walks NetEase, then Kugou, then LRCLIB: NetEase covers the most
+    ground for Chinese and Japanese releases, Kugou fills some of its gaps, and
+    LRCLIB is the stable public fallback.
+    """
     source = (_setting(api, 'source') or SOURCE_AUTO).lower()
     if source == SOURCE_NETEASE:
         return (SOURCE_NETEASE,)
+    if source == SOURCE_KUGOU:
+        return (SOURCE_KUGOU,)
     if source == SOURCE_LRCLIB:
         return (SOURCE_LRCLIB,)
-    return (SOURCE_NETEASE, SOURCE_LRCLIB)
+    return (SOURCE_NETEASE, SOURCE_KUGOU, SOURCE_LRCLIB)
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +358,7 @@ def _strip_credits(lrc: str) -> str:
             if (
                 not stripped
                 or _LRC_META.match(stripped)
+                or _TITLE_LINE.match(stripped)
                 or not text
                 or _CREDIT.match(text)
                 or _CREDIT_BARE.match(text)
@@ -514,6 +538,48 @@ def _pick_netease(songs, title, artist, duration):
 
     candidates.sort(key=rank)
     return candidates[:NETEASE_CANDIDATES]
+
+
+def _pick_kugou(songs, title, artist, duration):
+    """Rank the Kugou search results that match this track, best first.
+
+    Kugou durations are in seconds. Its result list mixes covers and unrelated
+    songs together, so an exact title match plus the artist check does most of
+    the filtering and the duration breaks the remaining ties. Like NetEase, the
+    same recording often appears several times and only some entries carry
+    lyrics, so the caller works down the list.
+    """
+    want_title = _normalize(title)
+    want_artist = _normalize(artist)
+
+    candidates = []
+    for song in songs:
+        if not isinstance(song, dict):
+            continue
+        if _normalize(song.get('songname')) != want_title:
+            continue
+        if not _artist_matches(want_artist, _normalize(song.get('singername'))):
+            continue
+        if not song.get('hash'):
+            continue
+        candidates.append(song)
+
+    if not candidates:
+        return []
+
+    def rank(song):
+        noisy = 1 if _NETEASE_NOISE.search(song.get('songname') or '') else 0
+        if duration:
+            try:
+                delta = abs(float(song.get('duration') or 0) - duration)
+            except (TypeError, ValueError):
+                delta = float('inf')
+        else:
+            delta = 0.0
+        return (noisy, delta)
+
+    candidates.sort(key=rank)
+    return candidates[:KUGOU_CANDIDATES]
 
 
 # ---------------------------------------------------------------------------
@@ -697,6 +763,8 @@ def _dispatch(ctx: _Lookup, sources, index):
         return None
     if sources[index] == SOURCE_NETEASE:
         return _request_netease(ctx, sources, index)
+    if sources[index] == SOURCE_KUGOU:
+        return _request_kugou(ctx, sources, index)
     return _request_lrclib(ctx, sources, index)
 
 
@@ -816,7 +884,7 @@ def _on_file_added(api: PluginApi, track, file) -> None:
 class FetchLyricsAction(BaseAction):
     """Right-click action: fetch lyrics for the selected tracks/albums."""
 
-    TITLE = 'Fetch lyrics (NetEase / LRCLIB)'
+    TITLE = 'Fetch lyrics (NetEase / Kugou / LRCLIB)'
 
     def callback(self, objs):
         api = self.api
@@ -946,6 +1014,102 @@ def _on_netease_lyric(ctx: _Lookup, candidates, sources, index, document, reply,
         artists,
         round((song.get('duration') or 0) / 1000.0, 1),
         (song.get('album') or {}).get('name'),
+    )
+    return _write_lyrics(ctx, description, lrc, _lrc_to_plain(lrc))
+
+
+# --- Kugou -----------------------------------------------------------------
+
+def _request_kugou(ctx: _Lookup, sources, index):
+    metadata = ctx.file.metadata
+    return ctx.api.web_service.get_url(
+        url=KUGOU_SEARCH_URL,
+        handler=partial(_on_kugou_search, ctx, sources, index),
+        # No parser: Kugou answers text/html, so the body is decoded here.
+        parse_response_type=None,
+        unencoded_queryargs={
+            'format': 'json',
+            'keyword': '%s %s' % (metadata.get('title'), metadata.get('artist')),
+            'page': 1,
+            'pagesize': KUGOU_SEARCH_LIMIT,
+            'showtype': 1,
+        },
+        headers=dict(KUGOU_HEADERS),
+        priority=True,
+    )
+
+
+def _on_kugou_search(ctx: _Lookup, sources, index, document, reply, error):
+    document = _as_json(document)
+    if error or not isinstance(document, dict):
+        return _retry_or_advance(
+            ctx, sources, index, 'Kugou search',
+            partial(_request_kugou, ctx, sources, index),
+        )
+
+    songs = (document.get('data') or {}).get('info')
+    if not songs:
+        ctx.api.logger.info('Lyrics: Kugou returned no results for %s', ctx.file.filename)
+        return _dispatch(ctx, sources, index + 1)
+
+    metadata = ctx.file.metadata
+    candidates = _pick_kugou(
+        songs, metadata.get('title'), metadata.get('artist'), _duration_seconds(metadata)
+    )
+    if not candidates:
+        ctx.api.logger.info(
+            'Lyrics: Kugou returned %d results for %s but none matched title/artist',
+            len(songs), ctx.file.filename,
+        )
+        return _dispatch(ctx, sources, index + 1)
+
+    return _request_kugou_lyric(ctx, candidates, sources, index)
+
+
+def _request_kugou_lyric(ctx: _Lookup, candidates, sources, index):
+    song = candidates[0]
+    return ctx.api.web_service.get_url(
+        url=KUGOU_LYRIC_URL,
+        handler=partial(_on_kugou_lyric, ctx, candidates, sources, index),
+        parse_response_type=None,
+        unencoded_queryargs={
+            'keyword': song.get('songname'),
+            'hash': song.get('hash'),
+            # Kugou wants milliseconds here and returns nothing without it.
+            'timelength': int(song.get('duration') or 0) * 1000,
+        },
+        headers=dict(KUGOU_HEADERS),
+        priority=True,
+    )
+
+
+def _on_kugou_lyric(ctx: _Lookup, candidates, sources, index, document, reply, error):
+    song = candidates[0]
+    document = _as_json(document)
+    if error or not isinstance(document, dict):
+        return _retry_or_advance(
+            ctx, sources, index, 'Kugou lyrics',
+            partial(_request_kugou_lyric, ctx, candidates, sources, index),
+        )
+
+    lrc = ((document.get('data') or {}).get('lrc') or '').strip()
+    if lrc and _setting(ctx.api, 'clean_lyrics'):
+        lrc = _strip_credits(lrc)
+
+    if not lrc:
+        remaining = candidates[1:]
+        if remaining:
+            ctx.api.logger.info(
+                'Lyrics: Kugou entry %s for %s has no lyrics, trying the next match',
+                song.get('hash'), ctx.file.filename,
+            )
+            return _request_kugou_lyric(ctx, remaining, sources, index)
+        ctx.api.logger.info('Lyrics: Kugou has no lyrics for %s', ctx.file.filename)
+        return _dispatch(ctx, sources, index + 1)
+
+    description = 'Kugou "%s" by %s (%ss, album %s)' % (
+        song.get('songname'), song.get('singername'),
+        song.get('duration'), song.get('album_name'),
     )
     return _write_lyrics(ctx, description, lrc, _lrc_to_plain(lrc))
 
@@ -1096,9 +1260,10 @@ class LrclibLyricsOptionsPage(OptionsPage):
         self.lbl_source = QLabel(self._tr('option.source', 'Lyrics source:'))
         self.cmb_source = QComboBox()
         self.cmb_source.addItem(
-            self._tr('option.source.auto', 'NetEase first, then LRCLIB'), SOURCE_AUTO
+            self._tr('option.source.auto', 'NetEase, then Kugou, then LRCLIB'), SOURCE_AUTO
         )
         self.cmb_source.addItem(self._tr('option.source.netease', 'NetEase only'), SOURCE_NETEASE)
+        self.cmb_source.addItem(self._tr('option.source.kugou', 'Kugou only'), SOURCE_KUGOU)
         self.cmb_source.addItem(self._tr('option.source.lrclib', 'LRCLIB only'), SOURCE_LRCLIB)
 
         self.cb_write_tags = QCheckBox(

@@ -696,13 +696,17 @@ check('all releases exhausted -> LRCLIB used',
 
 print()
 print('=== 7. _source_order ===')
-check('auto -> netease then lrclib',
-      plugin._source_order(FakeApi(FakeConfig(source='auto'))) == ('netease', 'lrclib'))
+check('auto -> netease, kugou then lrclib',
+      plugin._source_order(FakeApi(FakeConfig(source='auto')))
+      == ('netease', 'kugou', 'lrclib'))
 check('netease -> netease only',
       plugin._source_order(FakeApi(FakeConfig(source='netease'))) == ('netease',))
+check('kugou -> kugou only',
+      plugin._source_order(FakeApi(FakeConfig(source='kugou'))) == ('kugou',))
 check('lrclib -> lrclib only',
       plugin._source_order(FakeApi(FakeConfig(source='lrclib'))) == ('lrclib',))
-check('unset -> auto', plugin._source_order(FakeApi(FakeConfig())) == ('netease', 'lrclib'))
+check('unset -> auto',
+      plugin._source_order(FakeApi(FakeConfig())) == ('netease', 'kugou', 'lrclib'))
 
 print()
 print('=== 8. full chain: the reported track via NetEase ===')
@@ -754,16 +758,18 @@ check('translation merged when enabled',
 
 print()
 print('=== 10. fallback chain ===')
-# NetEase returns nothing -> LRCLIB must be tried.
+# NetEase returns nothing -> Kugou is tried -> then LRCLIB.
 responses = {plugin.NETEASE_SEARCH_URL: ({'result': {'songs': []}}, None),
+             plugin.KUGOU_SEARCH_URL: ({'data': {'info': []}}, None),
              plugin.LRCLIB_SEARCH_URL: (LRCLIB_HITS, None)}
 cfg = FakeConfig(**DEFAULTS)
 api = FakeApi(cfg, responses)
 meta = {'title': 'Lemon', 'artist': '米津玄師', '~length': '4:40'}
 plugin._on_file_added(api, FakeTrack(FakeAlbum()), FakeFile(os.path.join(tmp, 'd.mp3'), meta))
 urls = [c['url'] for c in api.web_service.calls]
-check('tries NetEase then LRCLIB', urls == [plugin.NETEASE_SEARCH_URL,
-                                            plugin.LRCLIB_SEARCH_URL], str(urls))
+check('tries NetEase, then Kugou, then LRCLIB',
+      urls == [plugin.NETEASE_SEARCH_URL, plugin.KUGOU_SEARCH_URL,
+               plugin.LRCLIB_SEARCH_URL], str(urls))
 check('LRCLIB result written', meta.get('syncedlyrics') == LRCLIB_HITS[1]['syncedLyrics'])
 check('task completed once after fallback', len(api.completed) == 1, str(api.completed))
 
@@ -1166,17 +1172,19 @@ attempts = len([c for c in api.web_service.calls if c['url'] == plugin.LRCLIB_SE
 check('LRCLIB search retried too', attempts == 2, 'attempts=%d' % attempts)
 check('lyrics written after the LRCLIB retry', bool(meta.get('syncedlyrics')))
 
-# An empty result list is NOT an error: it must not be retried.
+# An empty result list is NOT an error: it must not be retried. One request per
+# source (NetEase, Kugou, LRCLIB), no retries.
 responses = {
     plugin.NETEASE_SEARCH_URL: ({'result': {'songs': []}}, None),
+    plugin.KUGOU_SEARCH_URL: ({'data': {'info': []}}, None),
     plugin.LRCLIB_SEARCH_URL: ([], None),
 }
 api = FakeApi(FakeConfig(**DEFAULTS), responses)
 meta = {'title': 'x', 'artist': 'y'}
 plugin._on_file_added(api, FakeTrack(FakeAlbum()), FakeFile(os.path.join(tmp, 'rt5.mp3'), meta))
 attempts = len(api.web_service.calls)
-check('empty results are not retried', attempts == 2, 'requests=%d' % attempts)
-check('nothing written when both sources are empty', not meta.get('syncedlyrics'))
+check('empty results are not retried', attempts == 3, 'requests=%d' % attempts)
+check('nothing written when all sources are empty', not meta.get('syncedlyrics'))
 
 # A transport failure on ONE candidate must not abandon the other releases:
 # the retry budget is per candidate and exhaustion falls to the next one.
@@ -1222,6 +1230,7 @@ check('task completed once', len(api.completed) == 1, str(api.completed))
 responses = {
     plugin.NETEASE_SEARCH_URL: (TWO_LEMONS, None),
     plugin.NETEASE_LYRIC_URL: (None, PROTOCOL_ERROR),
+    plugin.KUGOU_SEARCH_URL: ({'data': {'info': []}}, None),
     plugin.LRCLIB_SEARCH_URL: (LRCLIB_HITS, None),
 }
 api = FakeApi(FakeConfig(**DEFAULTS), responses)
@@ -1550,6 +1559,91 @@ plugin._on_file_added(api, FakeTrack(FakeAlbum()),
 check('no refetch when synced lyrics are already present',
       [c['url'] for c in api.web_service.calls] == [plugin.LRCLIB_SEARCH_URL],
       str([c['url'] for c in api.web_service.calls]))
+
+print()
+print('=== 26. Kugou source ===')
+KUGOU_SEARCH_DOC = {'data': {'info': [
+    {'songname': '共犯', 'singername': 'Mrs. GREEN APPLE', 'hash': 'good1',
+     'duration': 231, 'album_name': 'POPS'},
+    {'songname': '共犯 (Live)', 'singername': 'Mrs. GREEN APPLE', 'hash': 'live1',
+     'duration': 240, 'album_name': 'Live'},
+    {'songname': '共犯', 'singername': 'Someone Else', 'hash': 'other1',
+     'duration': 231, 'album_name': 'X'},
+    {'songname': '共犯', 'singername': 'Mrs. GREEN APPLE', 'hash': 'far1',
+     'duration': 300, 'album_name': 'POPS'},
+]}}
+KUGOU_LRC_DOC = {'data': {'lrc': (
+    '[00:00.00]共犯 - Mrs. GREEN APPLE\n'
+    '[00:17.54]词：大森元貴\n'
+    '[00:21.93]曲：大森元貴\n'
+    '[00:26.31]制作人：大森元貴\n'
+    '[00:32.16]こんな処まで\n'
+    '[00:35.55]なにをしにきたんだっけ？\n')}}
+
+songs = KUGOU_SEARCH_DOC['data']['info']
+cands = plugin._pick_kugou(songs, '共犯', 'Mrs. GREEN APPLE', 231)
+check('picks the exact title/artist match', cands and cands[0]['hash'] == 'good1', str(cands[:1]))
+check('the closer duration is ranked first', cands[0]['duration'] == 231)
+check('wrong artist rejected',
+      plugin._pick_kugou([songs[2]], '共犯', 'Mrs. GREEN APPLE', 231) == [])
+check('"(Live)" title variant rejected',
+      plugin._pick_kugou([songs[1]], '共犯', 'Mrs. GREEN APPLE', 231) == [])
+check('empty list -> []', plugin._pick_kugou([], 'x', 'y', 1) == [])
+check('candidate list is capped',
+      len(plugin._pick_kugou(
+          [dict(songs[0], hash='h%d' % i) for i in range(10)],
+          '共犯', 'Mrs. GREEN APPLE', 231)) == plugin.KUGOU_CANDIDATES)
+
+# Full chain with source='kugou'.
+responses = {
+    plugin.KUGOU_SEARCH_URL: (KUGOU_SEARCH_DOC, None),
+    plugin.KUGOU_LYRIC_URL: (KUGOU_LRC_DOC, None),
+}
+api = FakeApi(FakeConfig(**dict(DEFAULTS, source='kugou')), responses)
+meta = {'title': '共犯', 'artist': 'Mrs. GREEN APPLE', '~length': '3:51'}
+plugin._on_file_added(api, FakeTrack(FakeAlbum()),
+                      FakeFile(os.path.join(tmp, 'kg.flac'), meta))
+check('source=kugou never calls NetEase',
+      all('music.163.com' not in c['url'] for c in api.web_service.calls))
+check('kugou lyrics written', 'こんな処まで' in (meta.get('lyrics') or ''),
+      repr((meta.get('lyrics') or '')[:50]))
+check('the "[00:00.xx] Title - Artist" line is dropped',
+      '共犯 - Mrs. GREEN APPLE' not in (meta.get('lyrics') or ''))
+check('the 词/曲/制作人 credits are dropped',
+      not any(k in (meta.get('lyrics') or '') for k in ('词：', '曲：', '制作人：')))
+check('timelength is sent in milliseconds',
+      any(c.get('unencoded_queryargs', {}).get('timelength') == 231000
+          for c in api.web_service.calls),
+      str([c.get('unencoded_queryargs') for c in api.web_service.calls]))
+check('all three lyric parameters are sent',
+      any(set(c.get('unencoded_queryargs', {})) == {'keyword', 'hash', 'timelength'}
+          for c in api.web_service.calls))
+check('Kugou answers are read without a response parser',
+      all(c.get('parse_response_type') is None
+          for c in api.web_service.calls if 'kugou' in c['url']))
+check('the log names Kugou as the source', api.logger.has('Kugou "'))
+check('task completed once', len(api.completed) == 1)
+
+# An entry without lyrics hands over to the next candidate.
+responses = {
+    plugin.KUGOU_SEARCH_URL: (KUGOU_SEARCH_DOC, None),
+    plugin.KUGOU_LYRIC_URL: [({'data': {'lrc': ''}}, None), (KUGOU_LRC_DOC, None)],
+}
+api = FakeApi(FakeConfig(**dict(DEFAULTS, source='kugou')), responses)
+meta = {'title': '共犯', 'artist': 'Mrs. GREEN APPLE', '~length': '3:51'}
+plugin._on_file_added(api, FakeTrack(FakeAlbum()),
+                      FakeFile(os.path.join(tmp, 'kg2.flac'), meta))
+check('an entry without lyrics falls through to the next match',
+      'こんな処まで' in (meta.get('lyrics') or ''))
+check('the fallthrough is logged', api.logger.has('trying the next match'))
+
+# source='netease' must not touch Kugou.
+api = FakeApi(FakeConfig(**dict(DEFAULTS, source='netease')), REPORTED)
+meta = {'title': '嵐の中でも', 'artist': '藍井エイル', '~length': '4:41'}
+plugin._on_file_added(api, FakeTrack(FakeAlbum()),
+                      FakeFile(os.path.join(tmp, 'kg3.mp3'), meta))
+check('source=netease never calls Kugou',
+      all('kugou' not in c['url'] for c in api.web_service.calls))
 
 print()
 failed = [n for n, ok, _ in RESULTS if not ok]
