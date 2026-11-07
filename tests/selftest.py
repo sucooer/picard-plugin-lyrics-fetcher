@@ -169,11 +169,18 @@ class PluginApi:
 
 
 def t_(key, text=None, plural=None):
-    """Picard's translation marker: returns the key unchanged at runtime."""
-    if plural is not None:
-        return (key, str(text), plural)
-    return key
+    """Picard's translation marker: returns the key unchanged at runtime.
 
+    The (key, text) pairs are recorded so the suite can check that the English
+    fallback carried by the marker matches the en.toml entry.
+    """
+    if plural is None:
+        T_MARKERS[key] = text
+        return key
+    return (key, str(text), plural)
+
+
+T_MARKERS = {}
 
 p3api.OptionsPage = OptionsPage
 p3api.BaseAction = BaseAction
@@ -1805,19 +1812,17 @@ import tomllib as _tomllib
 LOCALE_DIR = os.path.join(PLUGIN_DIR, 'locale')
 
 
-def _locale(key):
-    with open(os.path.join(LOCALE_DIR, 'zh_CN.toml'), 'rb') as handle:
-        return _tomllib.load(handle).get(key)
+def _load_locale(name):
+    with open(os.path.join(LOCALE_DIR, name), 'rb') as handle:
+        return _tomllib.load(handle)
 
 
 def _has_cjk(text):
     return any('\u4e00' <= ch <= '\u9fff' for ch in (text or ''))
 
 
-with open(os.path.join(LOCALE_DIR, 'en.toml'), 'rb') as handle:
-    _en = _tomllib.load(handle)
-with open(os.path.join(LOCALE_DIR, 'zh_CN.toml'), 'rb') as handle:
-    _zh = _tomllib.load(handle)
+_en = _load_locale('en.toml')
+_zh = _load_locale('zh_CN.toml')
 
 check('zh_CN.toml translates the menu entry',
       _has_cjk(_zh.get('action.fetch_lyrics')), repr(_zh.get('action.fetch_lyrics')))
@@ -1828,8 +1833,16 @@ check('the Chinese entry keeps the three source names',
 check('en.toml keeps the English menu entry',
       _en.get('action.fetch_lyrics') == 'Fetch lyrics (NetEase / Kugou / LRCLIB)',
       repr(_en.get('action.fetch_lyrics')))
-check('both locale files carry the key',
-      'action.fetch_lyrics' in _en and 'action.fetch_lyrics' in _zh)
+check('the marker carries the same English text as en.toml',
+      T_MARKERS.get('action.fetch_lyrics') == _en.get('action.fetch_lyrics'),
+      '%r vs %r' % (T_MARKERS.get('action.fetch_lyrics'), _en.get('action.fetch_lyrics')))
+check('every t_() marker key has an en.toml entry',
+      all(key in _en for key in T_MARKERS), str(sorted(T_MARKERS)))
+check('every en.toml entry is used by a t_() marker',
+      all(key in T_MARKERS for key in _en if not key.startswith('option.')),
+      str(sorted(k for k in _en if not k.startswith('option.'))))
+check('option keys are translated through the options page, not t_()',
+      all(key.startswith('option.') for key in _en if key not in T_MARKERS))
 
 print()
 failed = [n for n, ok, _ in RESULTS if not ok]
