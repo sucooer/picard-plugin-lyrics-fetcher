@@ -168,9 +168,17 @@ class PluginApi:
     pass
 
 
+def t_(key, text=None, plural=None):
+    """Picard's translation marker: returns the key unchanged at runtime."""
+    if plural is not None:
+        return (key, str(text), plural)
+    return key
+
+
 p3api.OptionsPage = OptionsPage
 p3api.BaseAction = BaseAction
 p3api.PluginApi = PluginApi
+p3api.t_ = t_
 picard.plugin3 = p3
 sys.modules['picard'] = picard
 sys.modules['picard.config'] = pconf
@@ -971,8 +979,9 @@ check('save processor registered', registered['save'] == [plugin._on_file_saved]
 check('options page registered', registered['options'] == [plugin.LrclibLyricsOptionsPage])
 check('track action registered', registered['track_action'] == [plugin.FetchLyricsAction])
 check('album action registered', registered['album_action'] == [plugin.FetchLyricsAction])
-check('action has a menu title', bool(plugin.FetchLyricsAction.TITLE),
-      plugin.FetchLyricsAction.TITLE)
+check('action title is a translation key',
+      plugin.FetchLyricsAction.TITLE == 'action.fetch_lyrics',
+      repr(plugin.FetchLyricsAction.TITLE))
 check('all settings declared', len(BoolOption.registry) == 6,
       str(sorted(n for _s, n in BoolOption.registry)))
 check('source default declared',
@@ -1788,6 +1797,39 @@ check('the live release was the one fetched',
       [p.get('id') for p in fetched] == [3453847193], str([p.get('id') for p in fetched]))
 check('the live lyric was written', '[01:16.423]' in (meta.get('syncedlyrics') or ''),
       repr((meta.get('syncedlyrics') or '')[:40]))
+
+print()
+print('=== 28. the context menu entry is localized, not hardcoded ===')
+import tomllib as _tomllib
+
+LOCALE_DIR = os.path.join(PLUGIN_DIR, 'locale')
+
+
+def _locale(key):
+    with open(os.path.join(LOCALE_DIR, 'zh_CN.toml'), 'rb') as handle:
+        return _tomllib.load(handle).get(key)
+
+
+def _has_cjk(text):
+    return any('\u4e00' <= ch <= '\u9fff' for ch in (text or ''))
+
+
+with open(os.path.join(LOCALE_DIR, 'en.toml'), 'rb') as handle:
+    _en = _tomllib.load(handle)
+with open(os.path.join(LOCALE_DIR, 'zh_CN.toml'), 'rb') as handle:
+    _zh = _tomllib.load(handle)
+
+check('zh_CN.toml translates the menu entry',
+      _has_cjk(_zh.get('action.fetch_lyrics')), repr(_zh.get('action.fetch_lyrics')))
+check('the Chinese entry keeps the three source names',
+      all(name in (_zh.get('action.fetch_lyrics') or '')
+          for name in ('网易云', '酷狗', 'LRCLIB')),
+      repr(_zh.get('action.fetch_lyrics')))
+check('en.toml keeps the English menu entry',
+      _en.get('action.fetch_lyrics') == 'Fetch lyrics (NetEase / Kugou / LRCLIB)',
+      repr(_en.get('action.fetch_lyrics')))
+check('both locale files carry the key',
+      'action.fetch_lyrics' in _en and 'action.fetch_lyrics' in _zh)
 
 print()
 failed = [n for n, ok, _ in RESULTS if not ok]

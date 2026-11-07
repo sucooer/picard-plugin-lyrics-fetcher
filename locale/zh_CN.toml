@@ -11,3 +11,4 @@
 "option.lrc.unsupported" = "仅当标签存不了时间轴时"
 "option.lrc.always" = "总是导出"
 "option.note" = "只有 MP3（ID3）有真正的同步歌词字段。FLAC、OGG/Opus、MP4/M4A 会被 Picard 静默丢弃 \"syncedlyrics\" 标签，所以这些格式会把带时间轴的歌词写进 \"lyrics\" 标签。三个来源都不使用 MusicBrainz ID 匹配，可能匹配错误，保存前请扫一眼。"
+"action.fetch_lyrics" = "抓取歌词（网易云 / 酷狗 / LRCLIB）"

@@ -47,7 +47,10 @@ picard-cli plugins install /path/to/picard-plugin-lrclib-lyrics
 ### 手动触发（右键菜单）
 
 自动抓取不灵、或者想单独给几首歌补歌词时，选中曲目或专辑 →
-**右键 → `Fetch lyrics (NetEase / Kugou / LRCLIB)`**。
+**右键 → `抓取歌词（网易云 / 酷狗 / LRCLIB）`**。
+
+菜单名跟随 Picard 的界面语言：英文界面下显示
+`Fetch lyrics (NetEase / Kugou / LRCLIB)`。
 
 手动触发会**忽略「已有歌词时不覆盖」**（你都主动点了），其余设置照常生效。
 它也会处理没匹配到 MusicBrainz 的曲目——只要文件本身有标题和艺人标签就行。
@@ -167,6 +170,8 @@ LRCLIB 继续走 Picard 自带的 web service。
   所以来源只有录音室版本时，宁可抓不到也不写错。
 - **歌词质量参差**。可能混入罗马音、翻译或元信息行。保存前扫一眼。
 - 抓不到时，先把文件里的 title / artist 改成更常见的写法再重试。
+- **界面语言跟随 Picard**。插件自带 `locale/` 翻译（中文和英文），右键菜单名会
+  跟着 Picard 的界面语言切换；翻译文件缺失时退回英文原文。
 - 网易云走的是它播放器自己调用的公开网页接口（`music.163.com/api/...`），
   **不是官方文档化的 API**，随时可能变更或拒绝请求。仅供个人整理本地音乐使用。
 

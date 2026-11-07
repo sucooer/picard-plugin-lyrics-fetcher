@@ -11,3 +11,4 @@
 "option.lrc.unsupported" = "Only for formats whose tags cannot hold the timestamps"
 "option.lrc.always" = "Always"
 "option.note" = "Only MP3 (ID3) has a real field for synced lyrics. FLAC, OGG/Opus and MP4/M4A silently drop the \"syncedlyrics\" tag, so for those the timed lyrics go into the \"lyrics\" tag instead. None of the sources match on MusicBrainz IDs, so mismatches are possible — skim the lyrics before saving."
+"action.fetch_lyrics" = "Fetch lyrics (NetEase / Kugou / LRCLIB)"

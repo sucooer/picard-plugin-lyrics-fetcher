@@ -21,7 +21,7 @@ from PyQt6 import QtCore, QtNetwork
 from PyQt6.QtWidgets import QCheckBox, QComboBox, QLabel, QVBoxLayout
 
 from picard.config import BoolOption, TextOption
-from picard.plugin3.api import BaseAction, OptionsPage, PluginApi
+from picard.plugin3.api import BaseAction, OptionsPage, PluginApi, t_
 
 # --- LRCLIB -----------------------------------------------------------------
 # We deliberately use the *search* endpoint rather than /api/get:
@@ -992,7 +992,7 @@ def _on_file_added(api: PluginApi, track, file) -> None:
 class FetchLyricsAction(BaseAction):
     """Right-click action: fetch lyrics for the selected tracks/albums."""
 
-    TITLE = 'Fetch lyrics (NetEase / Kugou / LRCLIB)'
+    TITLE = t_('action.fetch_lyrics', 'Fetch lyrics (NetEase / Kugou / LRCLIB)')
 
     def callback(self, objs):
         api = self.api
