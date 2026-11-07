@@ -148,9 +148,38 @@ p3 = types.ModuleType('picard.plugin3')
 p3api = types.ModuleType('picard.plugin3.api')
 
 
+def t_(key, text=None, plural=None):
+    """Picard's translation marker: returns the key unchanged at runtime.
+
+    The (key, text) pairs are recorded so the suite can check that the English
+    fallback carried by the marker matches the en.toml entry.
+
+    Declared before the stubs that call it at import time, because the plugin
+    module marks class attributes with it.
+    """
+    if plural is None:
+        T_MARKERS[key] = text
+        return key
+    return (key, str(text), plural)
+
+
+T_MARKERS = {}
+
+
 class OptionsPage:
+    TITLE = ''
+    NAME = ''
+    PARENT = None
+    api = None
+
     def __init__(self, parent=None):
         pass
+
+    @classmethod
+    def display_title(cls):
+        """Mirrors picard.util.display_title_base.HasDisplayTitle.display_title."""
+        title = getattr(cls, 'TITLE', getattr(cls, 'NAME', None)) or cls.__name__
+        return _translation_helper(getattr(cls, 'api', None), title)
 
 
 class BaseAction:
@@ -160,27 +189,51 @@ class BaseAction:
     def __init__(self, parent=None):
         pass
 
+    @classmethod
+    def display_title(cls):
+        """Mirrors picard.util.display_title_base.HasDisplayTitle.display_title."""
+        title = getattr(cls, 'TITLE', getattr(cls, 'NAME', None)) or cls.__name__
+        return _translation_helper(getattr(cls, 'api', None), title)
+
     def callback(self, objs):
         raise NotImplementedError
+
+
+def _translation_helper(api, text):
+    """Mirrors picard.util.display_title_base._translation_helper."""
+    if api:
+        return api.tr(text)
+    return text
+
+
+class _FakePluginApi:
+    """Mirrors PluginApi.tr() closely enough to drive display_title()."""
+
+    def __init__(self, locale, translations):
+        self.locale = locale
+        self._translations = translations
+        self._source_locale = 'en'
+
+    def tr(self, key, text=None, **kwargs):
+        result = None
+        if self._translations:
+            if self.locale in self._translations and key in self._translations[self.locale]:
+                result = self._translations[self.locale][key]
+            else:
+                lang = self.locale.split('_')[0]
+                if lang in self._translations and key in self._translations[lang]:
+                    result = self._translations[lang][key]
+                elif self._source_locale in self._translations \
+                        and key in self._translations[self._source_locale]:
+                    result = self._translations[self._source_locale][key]
+        if result is None:
+            result = text if text is not None else key
+        return result
 
 
 class PluginApi:
     pass
 
-
-def t_(key, text=None, plural=None):
-    """Picard's translation marker: returns the key unchanged at runtime.
-
-    The (key, text) pairs are recorded so the suite can check that the English
-    fallback carried by the marker matches the en.toml entry.
-    """
-    if plural is None:
-        T_MARKERS[key] = text
-        return key
-    return (key, str(text), plural)
-
-
-T_MARKERS = {}
 
 p3api.OptionsPage = OptionsPage
 p3api.BaseAction = BaseAction
@@ -1838,11 +1891,76 @@ check('the marker carries the same English text as en.toml',
       '%r vs %r' % (T_MARKERS.get('action.fetch_lyrics'), _en.get('action.fetch_lyrics')))
 check('every t_() marker key has an en.toml entry',
       all(key in _en for key in T_MARKERS), str(sorted(T_MARKERS)))
-check('every en.toml entry is used by a t_() marker',
+check('every non-option en.toml entry is used by a t_() marker',
       all(key in T_MARKERS for key in _en if not key.startswith('option.')),
       str(sorted(k for k in _en if not k.startswith('option.'))))
-check('option keys are translated through the options page, not t_()',
-      all(key.startswith('option.') for key in _en if key not in T_MARKERS))
+check('en.toml keys not used by a marker are options-page labels',
+      all(key.startswith('option.') for key in _en if key not in T_MARKERS),
+      str(sorted(k for k in _en if k not in T_MARKERS)))
+
+print()
+print('=== 29. both UI titles resolve through the locale files ===')
+# display_title() is what Picard calls when it builds the context menu and the
+# options dialog, so resolving through it (rather than reading TITLE) is the
+# closest the offline suite can get to the real widgets.
+_TRANSLATIONS = {'zh_CN': _zh, 'en': _en}
+
+ACTION = plugin.FetchLyricsAction
+PAGE = plugin.LrclibLyricsOptionsPage
+PLAIN_ACTION = type('Plain', (plugin.FetchLyricsAction,),
+                    {'TITLE': 'Fetch lyrics (NetEase / Kugou / LRCLIB)'})
+PLAIN_PAGE = type('PlainPage', (plugin.LrclibLyricsOptionsPage,),
+                  {'TITLE': 'Lyrics Fetcher'})
+
+
+def _display(cls, locale):
+    cls.api = None if locale is None else _FakePluginApi(locale, _TRANSLATIONS)
+    try:
+        return cls.display_title()
+    finally:
+        cls.api = None
+
+
+check('options page title is a translation key',
+      PAGE.TITLE == 'option.page_title', repr(PAGE.TITLE))
+check('zh_CN: options page title is Chinese',
+      _display(PAGE, 'zh_CN') == _zh.get('option.page_title'),
+      repr(_display(PAGE, 'zh_CN')))
+check('en: options page title is English',
+      _display(PAGE, 'en') == 'Lyrics Fetcher', repr(_display(PAGE, 'en')))
+check('zh_CN: menu entry is Chinese',
+      _display(ACTION, 'zh_CN') == '抓取歌词（网易云 / 酷狗 / LRCLIB）',
+      repr(_display(ACTION, 'zh_CN')))
+check('en: menu entry is English',
+      _display(ACTION, 'en') == 'Fetch lyrics (NetEase / Kugou / LRCLIB)',
+      repr(_display(ACTION, 'en')))
+check('a language with no file falls back to English',
+      _display(ACTION, 'fr_FR') == 'Fetch lyrics (NetEase / Kugou / LRCLIB)'
+      and _display(PAGE, 'fr_FR') == 'Lyrics Fetcher',
+      repr(_display(PAGE, 'fr_FR')))
+check('zh_TW resolves through the language-only fallback file',
+      _FakePluginApi('zh_TW', {'zh': _zh, 'en': _en}).tr(
+          ACTION.TITLE, 'Fetch lyrics (NetEase / Kugou / LRCLIB)')
+      == '抓取歌词（网易云 / 酷狗 / LRCLIB）')
+check('a region we ship no file for falls back to English',
+      _display(ACTION, 'zh_TW') == 'Fetch lyrics (NetEase / Kugou / LRCLIB)',
+      repr(_display(ACTION, 'zh_TW')))
+check('no translations -> the English fallback, never a bare key',
+      _FakePluginApi('zh_CN', {}).tr(ACTION.TITLE,
+                                     'Fetch lyrics (NetEase / Kugou / LRCLIB)')
+      == 'Fetch lyrics (NetEase / Kugou / LRCLIB)')
+check('a plain string title is passed through unchanged (old behaviour)',
+      _display(PLAIN_ACTION, 'zh_CN') == 'Fetch lyrics (NetEase / Kugou / LRCLIB)'
+      and _display(PLAIN_PAGE, 'zh_CN') == 'Lyrics Fetcher')
+check('display_title is called without an api too (no AttributeError)',
+      _display(ACTION, None) == 'action.fetch_lyrics',
+      repr(_display(ACTION, None)))
+
+check('zh_CN translates the options page title',
+      _has_cjk(_zh.get('option.page_title')), repr(_zh.get('option.page_title')))
+check('en.toml keeps the English options page title',
+      _en.get('option.page_title') == 'Lyrics Fetcher',
+      repr(_en.get('option.page_title')))
 
 print()
 failed = [n for n, ok, _ in RESULTS if not ok]

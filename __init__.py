@@ -1361,7 +1361,7 @@ def _on_file_saved(api: PluginApi, file) -> None:
 
 class LrclibLyricsOptionsPage(OptionsPage):
     NAME = 'lrclib_lyrics'
-    TITLE = 'Lyrics Fetcher'
+    TITLE = t_('option.page_title', 'Lyrics Fetcher')
     PARENT = 'plugins'
 
     def __init__(self, parent=None):
