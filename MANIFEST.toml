@@ -22,8 +22,8 @@ Requirements:
   ID3 (MP3) and Vorbis (FLAC, OGG, Opus). It is not supported for MP4/M4A.
 
 Caveats:
-- Neither source matches on MusicBrainz IDs; they match on artist, title and
-  duration, and their coverage is not complete. Mismatches are possible, so it
+- Neither source matches on MusicBrainz IDs; they match on artist, title, album
+  and duration, and their coverage is not complete. Mismatches are possible, so it
   is worth skimming the lyrics before saving.
 - NetEase and Kugou are used through their public web endpoints. These are
   undocumented and may change or start refusing requests without notice.

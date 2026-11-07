@@ -185,6 +185,19 @@ _CREDIT_BARE = re.compile(
 # NetEase covers are titled like "晴天（深情版）" or "Lemon (翻自 米津玄師)".
 _NETEASE_NOISE = re.compile(r'(翻自|翻唱|cover|纯音乐|伴奏|remix|钢琴版|吉他版)', re.IGNORECASE)
 
+# A trailing bracketed group on a title, e.g. "怪物 (LIVE 2024)" or
+# "怪物（深情版）". Live releases are often titled this way, with the release
+# name repeated inside the brackets.
+_TITLE_GROUP = re.compile(r'^(?P<base>.*?)\s*[\(（\[【](?P<suffix>[^\)）\]】]*)[\)）\]】]\s*$')
+
+# How far a source's duration may be from the file's before the record is
+# refused. Album, single and live versions of one song differ by far more than
+# this, while the same recording on two releases differs by a second or two.
+DURATION_TOLERANCE = 5
+
+# _album_rank() result for a source that does not say which album it is from.
+_ALBUM_UNKNOWN = 2
+
 
 # ---------------------------------------------------------------------------
 # settings
@@ -285,6 +298,51 @@ def _artist_matches(want: str, got: str) -> bool:
     if not want or not got:
         return False
     return want == got or want in got or got in want
+
+
+def _album_rank(want: str, got: str) -> int | None:
+    """How well a source's album name matches the file's.
+
+    0 for the same album, 1 when one name contains the other ("THE BOOK 2" vs
+    "THE BOOK 2 EP"), ``_ALBUM_UNKNOWN`` when either side has no album name,
+    and None when the two names clearly disagree. A None means the record is
+    from another release - typically the studio album when the file is a live
+    recording - and must not be used.
+    """
+    want = _normalize(want)
+    got = _normalize(got)
+    if not want or not got:
+        return _ALBUM_UNKNOWN
+    if want == got:
+        return 0
+    if want in got or got in want:
+        return 1
+    return None
+
+
+def _title_suffix(want: str, got: str) -> str | None:
+    """Return the extra part of a longer title, or None when it is not one.
+
+    "怪物" against "怪物 (LIVE 2024)" gives "live 2024"; a title that is not
+    the wanted one with a bracketed group appended gives None. The caller
+    decides whether the extra part is explained by the album.
+    """
+    if got == want:
+        return ''
+    match = _TITLE_GROUP.match(got)
+    if match and _normalize(match.group('base')) == want:
+        return _normalize(match.group('suffix'))
+    return None
+
+
+def _duration_rejects(want, got) -> bool:
+    """True when a source's duration is too far from the file's to be the same take."""
+    if not want or not got:
+        return False
+    try:
+        return abs(float(got) - float(want)) > DURATION_TOLERANCE
+    except (TypeError, ValueError):
+        return False
 
 
 def _duration_seconds(metadata) -> int | None:
@@ -457,16 +515,19 @@ def _supports_synced(file) -> bool:
 # record selection
 # ---------------------------------------------------------------------------
 
-def _pick_lrclib(results, title, artist, duration):
+def _pick_lrclib(results, title, artist, duration, album=None):
     """Choose the best matching record from a LRCLIB search result list.
 
-    A record is only accepted when the track title matches exactly (after
-    normalisation) and the artist name matches. Among the survivors we prefer
-    the one whose duration is closest to the file's, and then the one that
-    carries synced lyrics.
+    A record is only accepted when the track title matches (after
+    normalisation), the artist name matches, the album does not contradict the
+    file's, and the duration is close enough to be the same take. Among the
+    survivors we prefer the one from the same album, then the one whose
+    duration is closest to the file's, and then the one that carries synced
+    lyrics.
     """
     want_title = _normalize(title)
     want_artist = _normalize(artist)
+    want_album = _normalize(album)
 
     candidates = []
     for item in results:
@@ -476,14 +537,20 @@ def _pick_lrclib(results, title, artist, duration):
             continue
         if not _artist_matches(want_artist, _normalize(item.get('artistName'))):
             continue
+        album_rank = _album_rank(want_album, _normalize(item.get('albumName')))
+        if album_rank is None:
+            continue
+        if _duration_rejects(duration, item.get('duration')):
+            continue
         if not (item.get('syncedLyrics') or item.get('plainLyrics')):
             continue
-        candidates.append(item)
+        candidates.append((album_rank, item))
 
     if not candidates:
         return None
 
-    def rank(item):
+    def rank(entry):
+        album_rank, item = entry
         if duration:
             try:
                 delta = abs(float(item.get('duration') or 0) - duration)
@@ -491,13 +558,13 @@ def _pick_lrclib(results, title, artist, duration):
                 delta = float('inf')
         else:
             delta = 0.0
-        return (delta, 0 if item.get('syncedLyrics') else 1)
+        return (album_rank, delta, 0 if item.get('syncedLyrics') else 1)
 
     candidates.sort(key=rank)
-    return candidates[0]
+    return candidates[0][1]
 
 
-def _pick_netease(songs, title, artist, duration):
+def _pick_netease(songs, title, artist, duration, album=None):
     """Rank the NetEase search results that match this track, best first.
 
     NetEase routinely carries the same track several times - the album release,
@@ -509,15 +576,24 @@ def _pick_netease(songs, title, artist, duration):
     differently ("晴天（深情版）"), so the exact title match already filters out
     most of the noise; an extra penalty demotes anything that still smells like
     a re-recording.
+
+    Live releases are titled after the release itself ("怪物 (YOASOBI 5th
+    ANNIVERSARY DOME LIVE 2024 “超現実”)"), so a longer title is accepted when
+    the album name explains the extra part. Records from another album, or
+    whose duration is too far from the file's, are refused: that is what keeps
+    a live file from being given the studio lyrics.
     """
     want_title = _normalize(title)
     want_artist = _normalize(artist)
+    want_album = _normalize(album)
 
     candidates = []
     for song in songs:
         if not isinstance(song, dict):
             continue
-        if _normalize(song.get('name')) != want_title:
+        got_title = _normalize(song.get('name'))
+        suffix = _title_suffix(want_title, got_title)
+        if suffix is None:
             continue
         artists = song.get('artists') or []
         got_artist = _normalize(
@@ -525,14 +601,22 @@ def _pick_netease(songs, title, artist, duration):
         )
         if not _artist_matches(want_artist, got_artist):
             continue
+        album_rank = _album_rank(want_album, _normalize((song.get('album') or {}).get('name')))
+        if album_rank is None:
+            continue
+        if suffix and not (want_album and suffix in want_album):
+            continue
+        if _duration_rejects(duration, (song.get('duration') or 0) / 1000.0):
+            continue
         if not song.get('id'):
             continue
-        candidates.append(song)
+        candidates.append((album_rank, 1 if suffix else 0, song))
 
     if not candidates:
         return []
 
-    def rank(song):
+    def rank(entry):
+        album_rank, title_rank, song = entry
         noisy = 1 if _NETEASE_NOISE.search(song.get('name') or '') else 0
         if duration:
             try:
@@ -541,40 +625,51 @@ def _pick_netease(songs, title, artist, duration):
                 delta = float('inf')
         else:
             delta = 0.0
-        return (noisy, delta)
+        return (album_rank, title_rank, noisy, delta)
 
     candidates.sort(key=rank)
-    return candidates[:NETEASE_CANDIDATES]
+    return [song for _album, _title, song in candidates[:NETEASE_CANDIDATES]]
 
 
-def _pick_kugou(songs, title, artist, duration):
+def _pick_kugou(songs, title, artist, duration, album=None):
     """Rank the Kugou search results that match this track, best first.
 
     Kugou durations are in seconds. Its result list mixes covers and unrelated
-    songs together, so an exact title match plus the artist check does most of
-    the filtering and the duration breaks the remaining ties. Like NetEase, the
-    same recording often appears several times and only some entries carry
-    lyrics, so the caller works down the list.
+    songs together, so the title and artist checks do most of the filtering and
+    the album and duration break the remaining ties. Like NetEase, the same
+    recording often appears several times and only some entries carry lyrics,
+    so the caller works down the list. The rules are the same as NetEase's:
+    another album or a duration that is too far off means another take.
     """
     want_title = _normalize(title)
     want_artist = _normalize(artist)
+    want_album = _normalize(album)
 
     candidates = []
     for song in songs:
         if not isinstance(song, dict):
             continue
-        if _normalize(song.get('songname')) != want_title:
+        suffix = _title_suffix(want_title, _normalize(song.get('songname')))
+        if suffix is None:
             continue
         if not _artist_matches(want_artist, _normalize(song.get('singername'))):
             continue
+        album_rank = _album_rank(want_album, _normalize(song.get('album_name')))
+        if album_rank is None:
+            continue
+        if suffix and not (want_album and suffix in want_album):
+            continue
+        if _duration_rejects(duration, song.get('duration')):
+            continue
         if not song.get('hash'):
             continue
-        candidates.append(song)
+        candidates.append((album_rank, 1 if suffix else 0, song))
 
     if not candidates:
         return []
 
-    def rank(song):
+    def rank(entry):
+        album_rank, title_rank, song = entry
         noisy = 1 if _NETEASE_NOISE.search(song.get('songname') or '') else 0
         if duration:
             try:
@@ -583,10 +678,10 @@ def _pick_kugou(songs, title, artist, duration):
                 delta = float('inf')
         else:
             delta = 0.0
-        return (noisy, delta)
+        return (album_rank, title_rank, noisy, delta)
 
     candidates.sort(key=rank)
-    return candidates[:KUGOU_CANDIDATES]
+    return [song for _album, _title, song in candidates[:KUGOU_CANDIDATES]]
 
 
 # ---------------------------------------------------------------------------
@@ -948,7 +1043,8 @@ def _on_netease_search(ctx: _Lookup, sources, index, document, reply, error):
 
     metadata = ctx.file.metadata
     candidates = _pick_netease(
-        songs, metadata.get('title'), metadata.get('artist'), _duration_seconds(metadata)
+        songs, metadata.get('title'), metadata.get('artist'), _duration_seconds(metadata),
+        metadata.get('album'),
     )
     if not candidates:
         ctx.api.logger.info(
@@ -1067,7 +1163,8 @@ def _on_kugou_search(ctx: _Lookup, sources, index, document, reply, error):
 
     metadata = ctx.file.metadata
     candidates = _pick_kugou(
-        songs, metadata.get('title'), metadata.get('artist'), _duration_seconds(metadata)
+        songs, metadata.get('title'), metadata.get('artist'), _duration_seconds(metadata),
+        metadata.get('album'),
     )
     if not candidates:
         ctx.api.logger.info(
@@ -1155,7 +1252,8 @@ def _on_lrclib_search(ctx: _Lookup, sources, index, document, reply, error):
 
     metadata = ctx.file.metadata
     best = _pick_lrclib(
-        document, metadata.get('title'), metadata.get('artist'), _duration_seconds(metadata)
+        document, metadata.get('title'), metadata.get('artist'), _duration_seconds(metadata),
+        metadata.get('album'),
     )
     if best is None:
         ctx.api.logger.info(

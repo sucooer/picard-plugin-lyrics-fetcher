@@ -1221,17 +1221,17 @@ check('nothing written when all sources are empty', not meta.get('syncedlyrics')
 print()
 print('=== 19b. per-candidate fallback on NetEase lyric errors ===')
 TWO_LEMONS = {'result': {'songs': [
-    ne_song(555, 'Lemon', ['米津玄師'], 'BOOTLEG', 256000),
+    ne_song(555, 'Lemon', ['米津玄師'], 'BOOTLEG', 280000),
     ne_song(666, 'Lemon', ['米津玄師'], 'Lemon', 280000),
 ]}}
 GOOD_LRC = {'lrc': {'lyric': '[00:12.34] 檸檬\n[00:16.20] 夏の終わり'}}
 responses = {
     plugin.NETEASE_SEARCH_URL: (TWO_LEMONS, None),
     plugin.NETEASE_LYRIC_URL: [
-        (None, PROTOCOL_ERROR),    # candidate 1 (666), attempt 1
+        (None, PROTOCOL_ERROR),    # candidate 1 (555), attempt 1
         (None, PROTOCOL_ERROR),    # candidate 1, attempt 2
         (None, PROTOCOL_ERROR),    # candidate 1, attempt 3 -> budget spent
-        (None, PROTOCOL_ERROR),    # candidate 2 (555), attempt 1
+        (None, PROTOCOL_ERROR),    # candidate 2 (666), attempt 1
         (GOOD_LRC, None),          # candidate 2, retry succeeds
     ],
 }
@@ -1242,7 +1242,7 @@ plugin._on_file_added(api, FakeTrack(FakeAlbum()),
 ne_calls = [(url, params) for url, params in api._lyrics_fetcher_netease_client.calls
             if url == plugin.NETEASE_LYRIC_URL]
 check('candidate 1 is retried three times, then candidate 2 is tried',
-      [params.get('id') for _, params in ne_calls] == [666, 666, 666, 555, 555],
+      [params.get('id') for _, params in ne_calls] == [555, 555, 555, 666, 666],
       str([params.get('id') for _, params in ne_calls]))
 check('candidate 2 gets its own retry budget (error then success)',
       len(ne_calls) == 5, 'lyric calls=%d' % len(ne_calls))
@@ -1601,6 +1601,8 @@ KUGOU_SEARCH_DOC = {'data': {'info': [
      'duration': 231, 'album_name': 'X'},
     {'songname': '共犯', 'singername': 'Mrs. GREEN APPLE', 'hash': 'far1',
      'duration': 300, 'album_name': 'POPS'},
+    {'songname': '共犯', 'singername': 'Mrs. GREEN APPLE', 'hash': 'good2',
+     'duration': 232, 'album_name': 'POPS'},
 ]}}
 KUGOU_LRC_DOC = {'data': {'lrc': (
     '[00:00.00]共犯 - Mrs. GREEN APPLE\n'
@@ -1674,6 +1676,118 @@ plugin._on_file_added(api, FakeTrack(FakeAlbum()),
                       FakeFile(os.path.join(tmp, 'kg3.mp3'), meta))
 check('source=netease never calls Kugou',
       all('kugou' not in c['url'] for c in api.web_service.calls))
+
+print()
+print('=== 27. album-aware, duration-checked matching ===')
+# The reported case: a live album. NetEase carries the live entry under a title
+# that repeats the release name, next to several studio entries that share the
+# bare title and artist. Before the fix the studio entry won because only the
+# title and the artist were compared.
+LIVE_ALBUM = 'YOASOBI 5th ANNIVERSARY DOME LIVE 2024 “超現実” at TOKYO DOME'
+LIVE_TITLE = '怪物 (YOASOBI 5th ANNIVERSARY DOME LIVE 2024 “超現実”)'
+MONSTER_SONGS = [
+    ne_song(3453847193, LIVE_TITLE, ['YOASOBI'], LIVE_ALBUM, 284331),
+    ne_song(1803908863, '怪物', ['YOASOBI'], '怪物', 206000),
+    ne_song(1893590233, '怪物', ['YOASOBI'], 'THE BOOK 2', 205480),
+]
+
+cands = plugin._pick_netease(MONSTER_SONGS, '怪物', 'YOASOBI', 284, LIVE_ALBUM)
+check('live release wins over the studio release',
+      [c['id'] for c in cands] == [3453847193], str([c['id'] for c in cands]))
+check('only the live album survives',
+      all(c['album']['name'] == LIVE_ALBUM for c in cands),
+      str([c['album']['name'] for c in cands]))
+
+# Even without an album tag the studio entries are refused, because 206s is
+# nowhere near the file's 284s.
+check('studio-only results match nothing for a 284s file',
+      plugin._pick_netease(MONSTER_SONGS[1:], '怪物', 'YOASOBI', 284, None) == [])
+
+# A file that really is the studio version still finds it.
+check('the studio release is still matched for the studio file',
+      [c['id'] for c in plugin._pick_netease(MONSTER_SONGS, '怪物', 'YOASOBI', 206, '怪物')]
+      == [1803908863])
+
+# A longer title is only accepted when the album explains the extra part.
+check('a suffix the album does not explain is rejected',
+      plugin._pick_netease([ne_song(1, '怪物 (Remix)', ['YOASOBI'], LIVE_ALBUM, 284000)],
+                           '怪物', 'YOASOBI', 284, LIVE_ALBUM) == [])
+check('a suffix naming the album is accepted',
+      len(plugin._pick_netease([ne_song(1, '怪物 (Live)', ['YOASOBI'], 'Live', 284000)],
+                               '怪物', 'YOASOBI', 284, 'Live at Home')) == 1)
+check('a versioned title without an album to confirm it is rejected',
+      plugin._pick_netease([ne_song(1, '怪物 (Live)', ['YOASOBI'], 'Live', 284000)],
+                           '怪物', 'YOASOBI', 284, None) == [])
+
+print()
+print('=== 27b. album and duration helpers ===')
+check('_album_rank: identical -> 0', plugin._album_rank('A', 'a') == 0)
+check('_album_rank: containment -> 1',
+      plugin._album_rank('THE BOOK 2', 'THE BOOK 2 EP') == 1)
+check('_album_rank: unrelated -> None', plugin._album_rank('A', 'B') is None)
+check('_album_rank: no source album -> unknown',
+      plugin._album_rank('A', '') == plugin._ALBUM_UNKNOWN)
+check('_album_rank: no local album -> unknown',
+      plugin._album_rank('', 'A') == plugin._ALBUM_UNKNOWN)
+check('_title_suffix: bracketed group is extracted',
+      plugin._title_suffix('怪物', '怪物 (LIVE 2024)') == 'live 2024')
+check('_title_suffix: a plain title has no suffix',
+      plugin._title_suffix('怪物', '怪物') == '')
+check('_title_suffix: an unrelated title has no suffix',
+      plugin._title_suffix('怪物', '群青 (Live)') is None)
+check('duration inside the threshold is kept',
+      plugin._duration_rejects(284, 289) is False)
+check('duration outside the threshold is rejected',
+      plugin._duration_rejects(284, 205) is True)
+check('an unknown source duration is not rejected',
+      plugin._duration_rejects(None, 284) is False)
+check('an unknown local duration is not rejected',
+      plugin._duration_rejects(205, None) is False)
+
+# Kugou carries exactly the same two releases.
+KUGOU_MONSTER = {'data': {'info': [
+    {'songname': LIVE_TITLE, 'singername': 'YOASOBI', 'hash': 'live-hash',
+     'duration': 284, 'album_name': LIVE_ALBUM},
+    {'songname': '怪物', 'singername': 'YOASOBI', 'hash': 'studio-hash',
+     'duration': 206, 'album_name': '怪物'},
+]}}
+cands = plugin._pick_kugou(KUGOU_MONSTER['data']['info'], '怪物', 'YOASOBI', 284, LIVE_ALBUM)
+check('Kugou: only the live release survives',
+      [c['hash'] for c in cands] == ['live-hash'], str([c['hash'] for c in cands]))
+
+# LRCLIB has no live record here, but it must not hand back the studio one.
+LRCLIB_MONSTER = [
+    lrclib_record('怪物', 'YOASOBI', 205.0, album='THE BOOK 2'),
+    lrclib_record('怪物', 'YOASOBI', 284.0, album=LIVE_ALBUM),
+]
+best = plugin._pick_lrclib(LRCLIB_MONSTER, '怪物', 'YOASOBI', 284, LIVE_ALBUM)
+check('LRCLIB: the record matching album and duration is picked',
+      best is not None and best['duration'] == 284.0, str(best and best['duration']))
+check('LRCLIB: an album conflict alone rejects the studio record',
+      plugin._pick_lrclib([lrclib_record('怪物', 'YOASOBI', 284.0, album='THE BOOK 2')],
+                          '怪物', 'YOASOBI', 284, LIVE_ALBUM) is None)
+check('LRCLIB: a mismatched duration alone rejects the studio record',
+      plugin._pick_lrclib([lrclib_record('怪物', 'YOASOBI', 205.0, album=LIVE_ALBUM)],
+                          '怪物', 'YOASOBI', 284, LIVE_ALBUM) is None)
+
+# End to end: the live lyric must be the one that is written.
+live_tmp = tempfile.mkdtemp()
+responses = {
+    plugin.NETEASE_SEARCH_URL: ({'result': {'songs': MONSTER_SONGS}}, None),
+    plugin.NETEASE_LYRIC_URL: (
+        {'lrc': {'lyric': '[00:00.000] 作词 : Ayase\n'
+                          '[01:16.423]素晴らしき世界に今日も乾杯\n'
+                          '[01:19.267]街に飛び交う笑い声も'}}, None),
+}
+api = FakeApi(FakeConfig(**dict(DEFAULTS, source='netease')), responses)
+meta = {'title': '怪物', 'artist': 'YOASOBI', 'album': LIVE_ALBUM, '~length': '4:44'}
+plugin._on_file_added(api, FakeTrack(FakeAlbum()), FakeFile(os.path.join(live_tmp, 'm.mp3'), meta))
+fetched = [p for u, p in api._lyrics_fetcher_netease_client.calls
+           if u == plugin.NETEASE_LYRIC_URL]
+check('the live release was the one fetched',
+      [p.get('id') for p in fetched] == [3453847193], str([p.get('id') for p in fetched]))
+check('the live lyric was written', '[01:16.423]' in (meta.get('syncedlyrics') or ''),
+      repr((meta.get('syncedlyrics') or '')[:40]))
 
 print()
 failed = [n for n, ok, _ in RESULTS if not ok]
