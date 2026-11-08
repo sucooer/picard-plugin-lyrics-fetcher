@@ -1,6 +1,7 @@
 uuid = "3431b825-145a-4696-9785-542dea651391"
 name = "Lyrics Fetcher"
 description = "Fetch synced and plain lyrics from NetEase Cloud Music, Kugou and LRCLIB"
+version = "3.12.0"
 long_description = """
 Fetches lyrics from **NetEase Cloud Music**, **Kugou** and **LRCLIB** and writes them into your audio files.
 
@@ -35,3 +36,62 @@ license_url = "https://www.gnu.org/licenses/gpl-2.0.html"
 categories = ["metadata"]
 min_python_version = "3.10"
 source_locale = "en"
+
+[name_i18n]
+zh_CN = "歌词抓取"
+zh_TW = "歌詞抓取"
+
+[description_i18n]
+zh_CN = "从网易云音乐、酷狗音乐和 LRCLIB 抓取同步歌词与纯文本歌词"
+zh_TW = "從網易雲音樂、酷狗音樂和 LRCLIB 抓取同步歌詞與純文字歌詞"
+
+[long_description_i18n]
+zh_CN = """
+从 **网易云音乐**、**酷狗音乐** 和 **LRCLIB** 抓取歌词并写入音频文件。
+
+功能：
+- 把**带时间轴的歌词**写进 `syncedlyrics` 标签
+- 把**纯文本歌词**写进 `lyrics` 标签
+- 可选在音频文件旁导出 `.lrc` 边车文件
+- 可选不覆盖文件里已有的歌词
+- 网易云：去掉开头的制作人员信息（作词/作曲/编曲 …）
+- 去掉歌词中任意位置的制作人员和元信息行，包括演奏者名单
+  （作词/作曲/编曲/混音/编程/电吉他/键盘/鼓 …）以及只有时间轴的空行
+- 网易云：可以把中文翻译追加到每一行（双语歌词）
+- 来源可勾选任意组合，默认按「网易云 → 酷狗 → LRCLIB」依次尝试
+
+要求：
+- MusicBrainz Picard 3.0 或更新版本
+- `syncedlyrics` 标签只在能存储它的格式上生效：ID3（MP3）和
+  Vorbis（FLAC、OGG、Opus）。MP4/M4A 不支持。
+
+注意：
+- 各来源都不按 MusicBrainz ID 匹配，而是按艺人、标题、专辑和时长匹配，
+  收录率并非 100%。可能存在错配，保存前建议扫一眼歌词。
+- 网易云和酷狗走的是公开网页接口，没有官方文档，随时可能变更或拒绝请求。
+"""
+
+zh_TW = """
+從 **網易雲音樂**、**酷狗音樂** 和 **LRCLIB** 抓取歌詞並寫入音訊檔案。
+
+功能：
+- 把**帶時間軸的歌詞**寫進 `syncedlyrics` 標籤
+- 把**純文字歌詞**寫進 `lyrics` 標籤
+- 可選在音訊檔案旁匯出 `.lrc` 邊車檔案
+- 可選不覆寫檔案裡已有的歌詞
+- 網易雲：去掉開頭的製作人員資訊（作詞/作曲/編曲 …）
+- 去掉歌詞中任意位置的製作人員和中介資訊行，包括演奏者名單
+  （作詞/作曲/編曲/混音/編程/電吉他/鍵盤/鼓 …）以及只有時間軸的空行
+- 網易雲：可以把中文翻譯追加到每一行（雙語歌詞）
+- 來源可勾選任意組合，預設按「網易雲 → 酷狗 → LRCLIB」依次嘗試
+
+要求：
+- MusicBrainz Picard 3.0 或更新版本
+- `syncedlyrics` 標籤只在能儲存它的格式上生效：ID3（MP3）和
+  Vorbis（FLAC、OGG、Opus）。MP4/M4A 不支援。
+
+注意：
+- 各來源都不按 MusicBrainz ID 匹配，而是按藝人、標題、專輯和時長匹配，
+  收錄率並非 100%。可能存在錯配，儲存前建議掃一眼歌詞。
+- 網易雲和酷狗走的是公開網頁介面，沒有官方文件，隨時可能變更或拒絕請求。
+"""

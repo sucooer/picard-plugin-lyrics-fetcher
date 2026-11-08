@@ -40,7 +40,8 @@ picard-cli plugins install /path/to/picard-plugin-lrclib-lyrics
 
 安装后插件会出现在 **选项 → 插件** 列表里，自动启用，并在左侧选项树
 「插件」节点下多出一个 **歌词抓取** 设置页（英文界面下为
-**Lyrics Fetcher**）。
+**Lyrics Fetcher**）。插件列表里的**插件名**也跟着界面语言走，中文界面下显示
+**歌词抓取**。
 
 流程是全自动的：把音乐拖进 Picard → 插件按「标题 + 艺人 + 专辑 + 时长」查询
 → 结果写进元数据面板 → **点保存才会写进文件**。
@@ -172,9 +173,13 @@ LRCLIB 继续走 Picard 自带的 web service。
 - **歌词质量参差**。可能混入罗马音、翻译或元信息行。保存前扫一眼。
 - 抓不到时，先把文件里的 title / artist 改成更常见的写法再重试。
 - **界面语言跟随 Picard**。插件自带 `locale/` 翻译（中文和英文），右键菜单名和
-  选项页标题都会跟着 Picard 的界面语言切换。插件作者请勿把界面文字写死成中文：
-  英文来自 `locale/en.toml`，其他语言没有自己的翻译文件时也回退到它；如果
-  `locale/` 整个丢失，菜单会显示成翻译键（如 `action.fetch_lyrics`）。
+  选项页标题都会跟着 Picard 的界面语言切换；`MANIFEST.toml` 里的
+  `[name_i18n]` / `[description_i18n]` / `[long_description_i18n]` 让**插件列表里的
+  插件名和说明**也跟着切换。插件作者请勿把界面文字写死成中文：英文来自
+  `locale/en.toml`，其他语言没有自己的翻译文件时也回退到它；如果 `locale/` 整个
+  丢失，菜单会显示成翻译键（如 `action.fetch_lyrics`）。
+- **版本号写在 `MANIFEST.toml` 里**。`version` 字段和 git 标签 `vX.Y.Z` 一起构成
+  版本链，Picard 的「刷新全部」靠它判断有没有新版本。
 - 网易云走的是它播放器自己调用的公开网页接口（`music.163.com/api/...`），
   **不是官方文档化的 API**，随时可能变更或拒绝请求。仅供个人整理本地音乐使用。
 

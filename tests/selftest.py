@@ -9,6 +9,7 @@ fallback chain runs inside the test.
 import importlib.util
 import json
 import os
+import re
 import sys
 import tempfile
 import types
@@ -1961,6 +1962,107 @@ check('zh_CN translates the options page title',
 check('en.toml keeps the English options page title',
       _en.get('option.page_title') == 'Lyrics Fetcher',
       repr(_en.get('option.page_title')))
+
+print()
+print('=== 30. MANIFEST.toml carries a version and localized names ===')
+# Picard reads these itself: picard/plugin3/manifest.py resolves <field>_i18n
+# against the UI language and falls back to the plain field, and
+# picard/plugin3/validator.py rejects a malformed table. Mirror both here so a
+# manifest that Picard would refuse still fails the suite.
+with open(os.path.join(PLUGIN_DIR, 'MANIFEST.toml'), 'rb') as handle:
+    MANIFEST = _tomllib.load(handle)
+
+REQUIRED_MANIFEST_FIELDS = ['uuid', 'name', 'description', 'api']
+MAX_NAME_LENGTH = 100
+MAX_DESCRIPTION_LENGTH = 200
+MAX_LONG_DESCRIPTION_LENGTH = 2000
+LOCALE_PATTERN = re.compile(r'^[a-z]{2,3}(_[A-Z]{2})?$')
+
+
+def _localized(i18n_field, plain_field, locale):
+    """Picard's PluginManifest._localized, including the language-only fallback."""
+    section = MANIFEST.get(i18n_field)
+    if isinstance(section, dict):
+        value = section.get(locale)
+        if not isinstance(value, str):
+            value = section.get(locale.split('_')[0])
+        if isinstance(value, str):
+            return value
+    plain = MANIFEST.get(plain_field, '')
+    return plain if isinstance(plain, str) else ''
+
+
+check('every required manifest field is present',
+      all(MANIFEST.get(f) for f in REQUIRED_MANIFEST_FIELDS),
+      str({f: bool(MANIFEST.get(f)) for f in REQUIRED_MANIFEST_FIELDS}))
+check('the manifest declares a version',
+      bool(MANIFEST.get('version')), repr(MANIFEST.get('version')))
+check('the declared version parses as X.Y.Z',
+      bool(re.match(r'^\d+\.\d+\.\d+$', str(MANIFEST.get('version') or ''))),
+      repr(MANIFEST.get('version')))
+check('name stays within Picard\'s 100-character limit',
+      0 < len(MANIFEST.get('name') or '') <= MAX_NAME_LENGTH,
+      str(len(MANIFEST.get('name') or '')))
+check('description stays within Picard\'s 200-character limit',
+      0 < len(MANIFEST.get('description') or '') <= MAX_DESCRIPTION_LENGTH,
+      str(len(MANIFEST.get('description') or '')))
+check('the English long_description stays within 2000 characters',
+      len(MANIFEST.get('long_description') or '') <= MAX_LONG_DESCRIPTION_LENGTH,
+      str(len(MANIFEST.get('long_description') or '')))
+
+for _section in ('name_i18n', 'description_i18n', 'long_description_i18n'):
+    check('the %s section is a non-empty table' % _section,
+          isinstance(MANIFEST.get(_section), dict) and bool(MANIFEST.get(_section)),
+          repr(type(MANIFEST.get(_section)).__name__))
+    check('every %s key is a valid locale' % _section,
+          all(LOCALE_PATTERN.match(key) for key in (MANIFEST.get(_section) or {})),
+          str(sorted(MANIFEST.get(_section) or {})))
+    check('every %s value is a string' % _section,
+          all(isinstance(v, str) for v in (MANIFEST.get(_section) or {}).values()))
+    check('every %s long text stays within 2000 characters' % _section,
+          all(len(v) <= MAX_LONG_DESCRIPTION_LENGTH
+              for v in (MANIFEST.get(_section) or {}).values()),
+          str(sorted({k: len(v) for k, v in (MANIFEST.get(_section) or {}).items()}.items())))
+    check('no %s text contains HTML tags' % _section,
+          all('<' not in v or '>' not in v
+              for v in (MANIFEST.get(_section) or {}).values()))
+
+check('the plugin name is translated for a Chinese UI',
+      _has_cjk(_localized('name_i18n', 'name', 'zh_CN')),
+      repr(_localized('name_i18n', 'name', 'zh_CN')))
+check('the translated plugin name keeps the options page title wording',
+      _localized('name_i18n', 'name', 'zh_CN') == _zh.get('option.page_title'),
+      '%r vs %r' % (_localized('name_i18n', 'name', 'zh_CN'),
+                    _zh.get('option.page_title')))
+check('an English UI keeps the English plugin name',
+      _localized('name_i18n', 'name', 'en') == 'Lyrics Fetcher',
+      repr(_localized('name_i18n', 'name', 'en')))
+check('a language with no name_i18n entry falls back to English',
+      _localized('name_i18n', 'name', 'fr_FR') == 'Lyrics Fetcher'
+      and _localized('name_i18n', 'name', 'de') == 'Lyrics Fetcher',
+      repr(_localized('name_i18n', 'name', 'fr_FR')))
+check('zh_TW has its own traditional name, not the simplified fallback',
+      _localized('name_i18n', 'name', 'zh_TW') == '歌詞抓取',
+      repr(_localized('name_i18n', 'name', 'zh_TW')))
+check('a Chinese region we ship no entry for falls back to English',
+      _localized('name_i18n', 'name', 'zh_HK') == 'Lyrics Fetcher',
+      repr(_localized('name_i18n', 'name', 'zh_HK')))
+check('the description is translated for a Chinese UI',
+      _has_cjk(_localized('description_i18n', 'description', 'zh_CN')),
+      repr(_localized('description_i18n', 'description', 'zh_CN')))
+check('an English UI keeps the English description',
+      _localized('description_i18n', 'description', 'en')
+      == MANIFEST.get('description'),
+      repr(_localized('description_i18n', 'description', 'en')))
+check('the long description is translated for a Chinese UI',
+      _has_cjk(_localized('long_description_i18n', 'long_description', 'zh_CN')),
+      repr(_localized('long_description_i18n', 'long_description', 'zh_CN')[:40]))
+check('an English UI keeps the English long description',
+      _localized('long_description_i18n', 'long_description', 'en')
+      == MANIFEST.get('long_description'))
+check('the Chinese name matches what the plugin ships in zh_CN.toml',
+      _zh.get('option.page_title') in _localized('name_i18n', 'name', 'zh_CN'),
+      repr(_localized('name_i18n', 'name', 'zh_CN')))
 
 print()
 failed = [n for n, ok, _ in RESULTS if not ok]
